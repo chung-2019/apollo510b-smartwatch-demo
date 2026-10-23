@@ -496,3 +496,16 @@ python -m unittest discover -s tools/nemagfx_ui_designer/tests
   LRU 淘汰機制不會執行。這個機制仍保留，以供日後擴充地圖使用。
 - 天氣頁顯示的是範例資料：日期、地點、溫度與預報都由 `weather_prep.py` 畫進
   `WTHRUI.BIN`，只有時間是即時的。板子上目前沒有天氣資料來源。
+
+---
+
+## 10. 授權與聲明
+
+本專案自己的程式碼與素材採用 [`LICENSE`](LICENSE) 中的 BSD-3-Clause 授權。衍生自
+AmbiqSuite（Ambiq，BSD-3-Clause）、Cordio 範例程式（Arm／Packetcraft，Apache-2.0）、
+FreeRTOS（MIT）的檔案與 DejaVu 字型保留各自的授權聲明，詳見
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。每張圖片的來源記錄於
+[ASSET_PROVENANCE.md](ASSET_PROVENANCE.md)。
+
+地圖資料 © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright)，
+依 Open Database License（ODbL）授權提供。

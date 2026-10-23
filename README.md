@@ -528,3 +528,17 @@ font. `README.md` and `CHANGELOG.md` in that directory have the details.
 - The weather page shows sample data: the date, place, temperature and forecast
   are baked into `WTHRUI.BIN` by `weather_prep.py`, and only the clock is live.
   There is no weather source on the board yet.
+
+---
+
+## 10. License and notices
+
+The project's own code and assets are under the BSD-3-Clause license in
+[`LICENSE`](LICENSE). Files derived from AmbiqSuite (Ambiq, BSD-3-Clause), the
+Cordio sample applications (Arm / Packetcraft, Apache-2.0), FreeRTOS (MIT) and
+the DejaVu fonts keep their own notices; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Where each image comes from is
+described in [ASSET_PROVENANCE.md](ASSET_PROVENANCE.md).
+
+Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright),
+available under the Open Database License (ODbL).
