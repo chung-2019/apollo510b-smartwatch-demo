@@ -1,0 +1,12 @@
+# ---------------------------------------------------------------------------
+# Raw pixel data for the eMMC asset store (tools/assets_out/*.BIN)
+#
+# These are bare RGB565 / RGBA arrays with no file header. git decides between
+# text and binary by looking for a NUL byte near the start of a file, and the
+# map tiles have none there, so without this line they are taken for text. On
+# Windows, where core.autocrlf defaults to true, every 0x0A byte would then
+# become 0x0D 0x0A on checkout and the tiles would no longer be the size the
+# firmware checks for.
+# ---------------------------------------------------------------------------
+*.BIN binary
+*.bin binary

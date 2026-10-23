@@ -1,0 +1,24 @@
+// Software POI (Power-On-Init) reset -- Apollo510B EVB
+//
+// Purpose:
+//   After a debugger has halted the core (when JLinkGDBServer / Ozone closes, say),
+//   the Apollo510's GPU power domain can be left in a bad state, and the next run of
+//   the firmware HardFaults inside nema_sys_init() (CFSR=0x400 IMPRECISERR, from
+//   accessing the unpowered GPU register 0x400900F8).
+//   Neither `r` (reset & halt) nor `rnh` clears it.
+//
+//   RSTGEN->SWPOI resets every block except clock-gen / RTC / STIMER, including the
+//   power management unit, so it recovers fully.
+//   (SWPOR, by contrast, does not reset the power management unit and has no effect on this.)
+//
+// Usage (run from the gcc/ directory):
+//   make recover
+//
+device AP510NFA-CBR
+si SWD
+speed 4000
+connect
+
+// RSTGEN->SWPOI (0x40000004) = SWPOIKEY 0x1B
+w4 0x40000004 0x1B
+q

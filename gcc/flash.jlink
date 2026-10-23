@@ -1,0 +1,26 @@
+// J-Link flashing script -- Apollo510B EVB (AP510NFA-CBR)
+//
+// Requires: J-Link software V8.40 or newer.
+//           Older versions (V7.94, for instance) do not carry the MRAM flash loader
+//           for the AP510NFA-CBR, and connect fails with "No valid device has been selected."
+//
+// Usage (run from the gcc/ directory):
+//   make flash
+// or directly:
+//   "C:\Program Files\SEGGER\JLink_V840\JLink.exe" -nogui 1 -CommanderScript flash.jlink
+//
+device AP510NFA-CBR
+si SWD
+speed 4000
+connect
+
+// loadbin performs an implicit reset & halt itself, so no prior r/h is needed.
+loadbin bin/nemagfx_watchface.bin 0x00410000
+
+// rnh (reset, no halt) rather than r + g:
+// This example powers the GPU/DC/DSI down dynamically, so after a reset the CPU may
+// already be in a low-power state and cannot be halted; r then emits the misleading
+// "CPU could not be halted / Communication timed out".
+// rnh still performs Apollo5's device-specific reset (the SBL verifies the boot as usual) but does not attempt to halt.
+rnh
+qc
