@@ -123,6 +123,29 @@ extern "C"
 
 #define ASSET_MAP_TILE_FMT  "MAPTILE%u.BIN" // 468x468 RGB565, %u is the tile index
 
+//
+// The weather page, in two layers (see draw_weather() in render_task.c):
+//
+//   background  five plain skies (src/Generate_3/weather_cloud_0N.png); the
+//               drawing side pans them slowly left and right and moves on to
+//               the next one only after each full sweep
+//   overlay     date, temperature, forecast cards and the sun's glow: one
+//               transparent RGBA image that never moves. Drawn by
+//               tools/weather_prep.py, and only the part with content is stored
+//               (not the whole 468x468)
+//
+// The time and the Bluetooth symbol are not in the assets; the drawing side
+// draws them every frame.
+//
+// The early WEATHER0..4.BIN (the overlay baked into the sky) are no longer used
+// and can be deleted from eMMC. The names were deliberately not reused: had they
+// been, the old composites would be read in as backgrounds until the new files
+// were uploaded, and the overlay would appear twice.
+//
+#define ASSET_WEATHER_BG_FMT "WTHRBG%u.BIN"  // 468x468 RGB565, %u is the background index 0..4
+#define ASSET_WEATHER_COUNT  (5)
+#define ASSET_WEATHER_UI     "WTHRUI.BIN"    // ASSET_WEATHER_UI_W x _H RGBA8888
+
 //*****************************************************************************
 //
 //! @brief Asset dimensions.
@@ -217,6 +240,19 @@ extern "C"
 #define ASSET_MAP_TILE_W    (468)
 #define ASSET_MAP_TILE_H    (468)
 
+#define ASSET_WEATHER_W     (468)
+#define ASSET_WEATHER_H     (468)
+
+//
+// The weather overlay stores only the part with content: both sides are largely
+// transparent, and storing the whole frame would double what is read from PSRAM
+// every frame. These sizes must match UI_W/UI_H in tools/weather_prep.py and
+// TARGETS in tools/png_to_bin.py; where it lands on screen is WEATHER_UI_X/Y in
+// render_task.c.
+//
+#define ASSET_WEATHER_UI_W  (348)
+#define ASSET_WEATHER_UI_H  (392)
+
 //*****************************************************************************
 //
 //! @brief Mount the filesystem on eMMC.
@@ -238,6 +274,25 @@ extern "C"
 //
 //*****************************************************************************
 extern bool AssetStoreInit(void);
+
+//*****************************************************************************
+//
+//! @brief Create the filesystem mutex.
+//!
+//! @details FatFs does no locking of its own (FF_FS_REENTRANT = 0), while
+//! MapTask, RenderTask and the upload task all come in, so every access goes
+//! through this one lock.
+//!
+//! Must be called after the scheduler has started and before any task that uses
+//! assets is created -- currently setup_task() in rtos.c. It cannot go into
+//! AssetStoreInit(): creating a mutex before the scheduler starts masks
+//! interrupts until the scheduler starts, which would affect the boot
+//! provisioning and psram_init() that follow (see g_xLock in asset_store.c).
+//!
+//! Does nothing when the filesystem is not mounted; calling it twice is harmless.
+//
+//*****************************************************************************
+extern void AssetStoreLockInit(void);
 
 //*****************************************************************************
 //

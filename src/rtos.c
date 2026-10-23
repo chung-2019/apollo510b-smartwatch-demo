@@ -56,6 +56,7 @@
 #include "touch_task.h"
 #include "map_task.h"
 #include "asset_upload.h"
+#include "asset_store.h"
 //*****************************************************************************
 //
 // Task priority definition.
@@ -271,6 +272,14 @@ setup_task(void *pvParameters)
     //
     g_semDisplayStart = xSemaphoreCreateBinary();
     g_semDisplayEnd = xSemaphoreCreateBinary();
+
+    //
+    // The eMMC filesystem mutex. RenderTask, MapTask and the upload task all read
+    // or write assets, so the lock must exist before they are created; it cannot
+    // be created any earlier (in main()) either -- see AssetStoreLockInit() in
+    // asset_store.h.
+    //
+    AssetStoreLockInit();
 
     //
     // Create the render tasks with the high priority.

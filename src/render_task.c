@@ -83,6 +83,7 @@
 #include "led_task.h"
 #include "map_task.h"
 #include "asset_store.h"
+#include "asset_upload.h"
 #include "psram.h"
 
 //
@@ -957,9 +958,15 @@
 //
 // Home page quick page menu (slides in from the left).
 //
-// The frame reuses the brightness panel's size and palette, with two navigation
-// entries stacked inside. That keeps all three overlays in one visual language
-// without mixing the brightness slider's state into the page menu.
+// The frame reuses the brightness panel's size and palette, with navigation
+// entries stacked inside (temperature trend, weather, navigation -- the same order
+// as the carousel). That keeps all three overlays in one visual language without
+// mixing the brightness slider's state into the page menu.
+//
+// The tile height divides the space by the entry count (PAGE_MENU_ACT_COUNT):
+// with three entries each tile is 97 px, the three icons are all about 65 px
+// tall, leaving a dozen px or so above and below. A fourth entry would bring the
+// tiles down to 70 px, and the icons would have to shrink with them.
 //
 //*****************************************************************************
 #define PAGE_MENU_PANEL_W       BL_PANEL_W
@@ -972,7 +979,8 @@
 #define PAGE_MENU_GAP           (14)
 #define PAGE_MENU_TILE_W        (PAGE_MENU_PANEL_W - (2 * PAGE_MENU_PAD))
 #define PAGE_MENU_TILE_H        ((PAGE_MENU_PANEL_H - (2 * PAGE_MENU_PAD) - \
-                                  PAGE_MENU_GAP) / 2)
+                                  ((PAGE_MENU_ACT_COUNT - 1) * PAGE_MENU_GAP)) / \
+                                 PAGE_MENU_ACT_COUNT)
 #define PAGE_MENU_TILE_X        (PAGE_MENU_PANEL_X + PAGE_MENU_PAD)
 #define PAGE_MENU_TILE_Y(row)   (PAGE_MENU_PANEL_Y + PAGE_MENU_PAD + \
                                  ((row) * (PAGE_MENU_TILE_H + PAGE_MENU_GAP)))
@@ -982,12 +990,207 @@
 #define PAGE_MENU_ICON_CY(row)  ((float)PAGE_MENU_TILE_Y(row) + \
                                  ((float)PAGE_MENU_TILE_H / 2.0f))
 #define PAGE_MENU_ICON_STROKE   (5.0f)
-#define PAGE_MENU_DETAIL_STROKE (2.0f)
+
+//
+// Line width of the weather icon's sun rays: a little thinner than the main
+// stroke, so the eight short rays do not blur into a gear.
+//
+#define PAGE_MENU_RAY_STROKE    (4.0f)
+
+//
+// Navigation icon: a cyan navigation arrow inside a white ring (a compass rim),
+// pointing to the upper right.
+//
+// Ring radius 29 plus a 5 px stroke makes the whole about 63 px tall, the same
+// class as the trend and weather icons. The arrow's circumradius is 21; its mass
+// sits towards the tip, so the whole arrow is nudged down and left a little
+// (PAGE_MENU_NAV_ARROW_D) to look centred in the ring.
+//
+#define PAGE_MENU_NAV_RING_R    (29.0f)
+#define PAGE_MENU_NAV_ARROW_R   (21.0f)
+#define PAGE_MENU_NAV_ARROW_D   (1.5f)
 
 #define PAGE_MENU_PANEL_COLOR   BL_PANEL_COLOR
 #define PAGE_MENU_TILE_COLOR    CC_TILE_NAV_COLOR
 #define PAGE_MENU_ICON_COLOR    CC_ICON_OFF_COLOR
 #define PAGE_MENU_ACCENT_COLOR  CC_ABGR(0xff, 0x22, 0xe0, 0xf0)
+
+//*****************************************************************************
+//
+// The temperature page's Bluetooth profile panel (BTP).
+//
+// A translucent drawer pulled down from the top edge, showing this BLE link's
+// actual parameters: device name, RSSI, service, security. Display only, no
+// controls -- disconnect and reconnect are not implemented yet, so the panel
+// carries nothing that looks pressable either (the design's two buttons at the
+// bottom and the switch in the top right are left out for now).
+//
+// The design also had rows for connection interval / PHY and update period;
+// they were dropped to give the remaining four rows enough spacing. The BLE side
+// still fills in the interval and PHY fields of ble_link_info_t, so the data is
+// ready if they come back.
+//
+// Everything comes from ble_link_info_get() in ble_pair.h, written by the BLE
+// side in its DM event handling. A field that is not known is drawn as "--"
+// rather than guessed.
+//
+//*****************************************************************************
+
+//
+// Panel geometry.
+//
+// This is a round panel and a rectangle's corners get cut off, so the sizes are
+// not arbitrary: the rounded rectangle must lie entirely inside the circle of
+// radius 234, which requires
+//
+//     sqrt((W/2 - R)^2 + (H/2 - R)^2) + R <= 234
+//
+// With 344 x 352 and R = 44: sqrt(128^2 + 132^2) + 44 = 227.9, leaving a 6 px
+// margin. Recompute when changing any of the three, or the screen eats the corners.
+//
+#define BTP_PANEL_W         (344)
+#define BTP_PANEL_H         (352)
+#define BTP_PANEL_X         ((FB_RESX - BTP_PANEL_W) / 2)   // 62
+#define BTP_PANEL_Y         ((FB_RESY - BTP_PANEL_H) / 2)   // 58
+#define BTP_PANEL_R         (44)
+
+//
+// Width of the left and right "go back" zones.
+//
+// The panel itself takes the central 344 px, leaving only 62 px of blank space
+// outside it on each side -- too narrow to serve as the way back. So the outer
+// third of the screen on each side is the back zone: a tap there closes the
+// panel, even if it lands on the panel. Nothing on the panel is tappable, so this
+// cannot collide with any other action.
+//
+// The middle third deliberately ignores taps: that is where the values are, and
+// a finger resting there while reading should not make the panel disappear.
+//
+#define BTP_BACK_ZONE_W     (FB_RESX / 3)                   // 156
+
+//
+// The chevron handle at the top edge. Drawn outside the panel to tell the user
+// "swipe up to put this away".
+//
+#define BTP_CHEV_CX         ((float)FB_RESX / 2.0f)
+#define BTP_CHEV_CY         (34.0f)
+#define BTP_CHEV_HALF_W     (19.0f)
+#define BTP_CHEV_DROP       (9.0f)
+#define BTP_CHEV_W          (4.5f)
+
+//
+// The title row.
+//
+// The title and the state text are 32 px apart centre to centre, leaving about
+// 11 px from the title's baseline to the state text's cap height (glyph heights
+// are estimated as described for the data rows below); the midline of the two
+// lines together still lines up with the Bluetooth icon's centre.
+//
+#define BTP_PAD             (22)
+#define BTP_CONTENT_X       (BTP_PANEL_X + BTP_PAD)         // 84
+#define BTP_HEAD_ICON_CX    ((float)BTP_CONTENT_X + 18.0f)  // 102
+#define BTP_HEAD_ICON_CY    ((float)BTP_PANEL_Y + 46.0f)    // 104
+#define BTP_HEAD_ICON_SIZE  (38.0f)
+#define BTP_HEAD_TEXT_X     ((float)BTP_CONTENT_X + 48.0f)  // 132
+#define BTP_HEAD_TEXT_W     (190.0f)
+#define BTP_TITLE_CY        ((float)BTP_PANEL_Y + 32.0f)    // 90
+#define BTP_STATE_CY        ((float)BTP_PANEL_Y + 64.0f)    // 122
+
+//
+// The status dot in the top right. It replaces the design's switch -- a switch
+// would suggest Bluetooth can be turned off, which this version cannot do.
+//
+#define BTP_DOT_CX          ((float)(BTP_PANEL_X + BTP_PANEL_W - BTP_PAD - 10))
+#define BTP_DOT_CY          BTP_HEAD_ICON_CY
+#define BTP_DOT_R           (7.0f)
+#define BTP_DOT_RING_R      (13.0f)
+#define BTP_DOT_RING_W      (2.0f)
+
+//
+// The inner card and the data rows.
+//
+// Four rows share the card height: 246 / 4 = 61 px. The row height comes from
+// integer division, so the card's bottom may be a few px off -- the separators
+// follow the rows, so it does not show.
+//
+// The vertical layout within a row (relative to the row top; the next separator
+// is at 60). Glyph heights take one em as about 1.33 x the font size, worked back
+// from photographed widths of "Bluetooth" and "DISCONNECTED";
+// NEMA_VG_ALIGNY_CENTER centres the ascender-to-descender cell, so the baseline
+// lands 0.346 em below the centre.
+//
+//   label @14   centre 17   cap top   9.9   baseline 23.5
+//   value @19   centre 41   asc. top 30.5   baseline 49.8   desc. bottom 55.0
+//
+// That leaves 7 px from the label's baseline to the value's ascenders, and 5 px
+// from the descenders to the separator. Do not move the two centres closer: at
+// 16 px apart the label's capitals touch the tops of the value's l / h / d, and
+// the descender of g reaches the separator.
+//
+#define BTP_CARD_X          (BTP_PANEL_X + 16)              // 78
+#define BTP_CARD_W          (BTP_PANEL_W - 32)              // 312
+#define BTP_CARD_Y          (BTP_PANEL_Y + 90)              // 148
+#define BTP_CARD_H          (BTP_PANEL_H - 90 - 16)         // 246
+#define BTP_CARD_R          (26)
+
+#define BTP_ROW_COUNT       (4)
+#define BTP_ROW_H           (BTP_CARD_H / BTP_ROW_COUNT)    // 61
+#define BTP_ROW_Y(i)        ((float)BTP_CARD_Y + ((float)(i) * (float)BTP_ROW_H))
+
+#define BTP_ROW_ICON_CX     ((float)BTP_CARD_X + 26.0f)     // 104
+#define BTP_ROW_ICON_DY     (30.0f)     // midline of the block from label top to value baseline
+#define BTP_ROW_TEXT_X      ((float)BTP_CARD_X + 50.0f)     // 128
+#define BTP_ROW_TEXT_W      ((float)BTP_CARD_W - 64.0f)     // 248
+#define BTP_ROW_LABEL_DY    (17.0f)
+#define BTP_ROW_VALUE_DY    (41.0f)
+
+//
+// Font sizes. The panel is a rectangle with no chord-width limit like the
+// temperature page has, but the device and service names vary with the
+// configuration, so btp_text() still measures and shrinks text that is too wide.
+//
+#define BTP_TITLE_FONT      (25.0f)
+#define BTP_STATE_FONT      (19.0f)
+#define BTP_LABEL_FONT      (14.0f)
+#define BTP_VALUE_FONT      (19.0f)
+#define BTP_TEXT_BOX_H(sz)  ((sz) * 2.0f)
+
+//
+// Shared line widths of the small icons. The icons are drawn by hand as a centre
+// plus pixel offsets (as the control centre does), not scaled with a matrix --
+// NemaVG's line width lives in the same space as the coordinates, so scaling
+// would scale the strokes too.
+//
+#define BTP_ICON_STROKE     (2.2f)
+#define BTP_HEAD_ICON_W     (3.2f)
+
+//
+// Colours.
+//
+// The panel alpha is a little lower than the control centre's (0xdc): the glass
+// in the design lets the dial underneath show through, and the temperature
+// page's background is dark enough that it does not get in the way of reading.
+//
+#define BTP_PANEL_COLOR     CC_ABGR(0xd0, 0x07, 0x11, 0x1d)
+#define BTP_CARD_COLOR      CC_ABGR(0x4e, 0x24, 0x36, 0x4c)
+#define BTP_SEP_COLOR       CC_ABGR(0x34, 0x6a, 0x88, 0xa8)
+#define BTP_LABEL_COLOR     CC_ABGR(0xff, 0x92, 0xa8, 0xc0)
+#define BTP_VALUE_COLOR     TEMP_VALUE_COLOR
+#define BTP_ACCENT_COLOR    TEMP_ACCENT_COLOR
+#define BTP_IDLE_COLOR      TEMP_IDLE_COLOR
+
+//
+// RSSI grade colours. The thresholds follow the usual phone signal-bar mapping:
+//
+//   >= -60 dBm  excellent    -60 ~ -75  good    -75 ~ -88  fair    < -88  weak
+//
+#define BTP_RSSI_EXCELLENT  (-60)
+#define BTP_RSSI_GOOD       (-75)
+#define BTP_RSSI_FAIR       (-88)
+
+#define BTP_GOOD_COLOR      CC_ABGR(0xff, 0x22, 0xdd, 0x88)
+#define BTP_WARN_COLOR      CC_ABGR(0xff, 0xff, 0xc0, 0x40)
+#define BTP_WEAK_COLOR      TEMP_PAIR_FAIL_COLOR
 
 //
 // The start of an upward drag is limited by BL_PULL_START_MIN_Y, derived
@@ -1288,7 +1491,11 @@ typedef enum
     UI_PAGE_WATCH,      // The analogue watch face.
     UI_PAGE_TEMP,       // TMP119 temperature display.
     UI_PAGE_TREND,      // Time / date and the 3D temperature trend of the TMP119.
-    UI_PAGE_MAP,        // Map navigation from Taipei 101 to Taipei Main Station.
+    UI_PAGE_WEATHER,    // Weather: five cloud skies panning and cross-fading, live clock.
+    UI_PAGE_MAP,        // Map navigation from Taipei 101 to Taipei Main Station. Kept as
+                        // the last page: horizontal swipes on it drag the map, so in the
+                        // middle of the carousel moving on would mean dragging the map to
+                        // its boundary first.
     UI_PAGE_COUNT,      // The number of browsable pages; must come after every switchable page.
 
     //
@@ -1737,6 +1944,36 @@ static const nema_vg_float_t g_pfSunIconData[] =
 
 static NEMA_VG_PATH_HANDLE  g_hSunIconPath;
 
+//
+// The navigation arrow of the home page quick page menu. The same shape as the
+// map page's car (an arrow with a notched tail, centred on the origin, pointing
+// along +x), only with the circumradius enlarged to PAGE_MENU_NAV_ARROW_R; a
+// matrix turns it to the upper right when drawn (see page_menu_draw_nav_icon()).
+//
+// The map's g_hCarPath is not reused: that path is declared later in this file,
+// in the map section, so it is not visible here -- and it is 13 px in size.
+//
+// A filled shape: the fill rule must be NON_ZERO before drawing it.
+//
+static const uint8_t g_pui8NavArrowSegs[] =
+{
+    NEMA_VG_PRIM_MOVE,      // tip
+    NEMA_VG_PRIM_LINE,      // rear left
+    NEMA_VG_PRIM_LINE,      // tail notch
+    NEMA_VG_PRIM_LINE,      // rear right
+    NEMA_VG_PRIM_CLOSE
+};
+
+static const nema_vg_float_t g_pfNavArrowData[] =
+{
+     PAGE_MENU_NAV_ARROW_R,          0.0f,
+    -PAGE_MENU_NAV_ARROW_R * 0.7f,  -PAGE_MENU_NAV_ARROW_R * 0.7f,
+    -PAGE_MENU_NAV_ARROW_R * 0.35f,  0.0f,
+    -PAGE_MENU_NAV_ARROW_R * 0.7f,   PAGE_MENU_NAV_ARROW_R * 0.7f
+};
+
+static NEMA_VG_PATH_HANDLE  g_hNavArrowPath;
+
 //*****************************************************************************
 //
 // State and cell definitions of the control centre.
@@ -1769,6 +2006,21 @@ static bool g_bPageMenuOpen = false;
 //*****************************************************************************
 static bool g_bBlOpen = false;
 
+//*****************************************************************************
+//
+// Whether the temperature page's Bluetooth profile panel is open.
+//
+// Meaningful only on the temperature page (pulled down from the top edge), and
+// always closed on a page change. Mutually exclusive with the brightness panel
+// and the control centre -- they are all overlays, and with two open at once the
+// release of a finger would be interpreted by both.
+//
+// Like g_bBlOpen it is not inside WATCHFACE_ENABLE_TOUCH: btp_draw() is called
+// from draw_temp(), which that switch does not affect.
+//
+//*****************************************************************************
+static bool g_bBtpOpen = false;
+
 #if WATCHFACE_ENABLE_TOUCH
 //
 // Only touch interaction uses these, so they are compiled in with
@@ -1791,11 +2043,12 @@ typedef enum
 } cc_action_e;
 
 //
-// The two entries of the home page quick page menu.
+// The entries of the home page quick page menu, top to bottom.
 //
 typedef enum
 {
     PAGE_MENU_ACT_TREND = 0,
+    PAGE_MENU_ACT_WEATHER,
     PAGE_MENU_ACT_MAP,
     PAGE_MENU_ACT_COUNT
 } page_menu_action_e;
@@ -2155,6 +2408,25 @@ cc_icons_init(void)
                            g_pfTempIconData);
 
     nema_vg_paint_set_type(g_hCcIconPaint, NEMA_VG_PAINT_COLOR);
+
+    //
+    // The quick page menu's navigation arrow. Checked separately from the ones
+    // above: failing to create it only costs the menu its arrow (the ring is still
+    // drawn) and should not take the control centre's icons down with it.
+    //
+    g_hNavArrowPath = nema_vg_path_create();
+
+    if ( g_hNavArrowPath == NULL )
+    {
+        am_util_debug_printf("[render] page menu: nav arrow path create failed\n");
+        return;
+    }
+
+    nema_vg_path_set_shape(g_hNavArrowPath,
+                           sizeof(g_pui8NavArrowSegs) / sizeof(g_pui8NavArrowSegs[0]),
+                           g_pui8NavArrowSegs,
+                           sizeof(g_pfNavArrowData) / sizeof(g_pfNavArrowData[0]),
+                           g_pfNavArrowData);
 }
 
 //*****************************************************************************
@@ -2348,9 +2620,10 @@ cc_draw(void)
 //
 //! @brief Draw the quick page menu summoned by a right swipe on the home page.
 //!
-//! @details The frame reuses the brightness panel, holding a trend polyline and a
-//! GPS satellite as two vertically stacked buttons. The caller must already have
-//! drawn the home page and bound the frame buffer and command list.
+//! @details The frame reuses the brightness panel, holding a trend polyline, the
+//! weather and a navigation arrow as three vertically stacked buttons. The caller
+//! must already have drawn the home page and bound the frame buffer and command
+//! list.
 //
 //*****************************************************************************
 static void
@@ -2393,97 +2666,117 @@ page_menu_draw_trend_icon(float fCx, float fCy)
     }
 }
 
+//
+// Navigation icon: a solid cyan navigation arrow inside a white ring, pointing to
+// the upper right.
+//
+// Drawn the same way as the map page's car: ring first, then the arrow; the
+// arrow's matrix rotates first and then translates -- the other order would spin
+// it about the screen origin and fling it away. The screen's y axis points down,
+// so -45 degrees is the upper right.
+//
+// The translation adds PAGE_MENU_NAV_ARROW_D towards the lower left: the arrow's
+// area is concentrated at the tip, and centring it on its circumcircle makes it
+// look shifted to the upper right.
+//
 static void
-page_menu_draw_gps_icon(float fCx, float fCy)
+page_menu_draw_nav_icon(float fCx, float fCy)
 {
     nema_matrix3x3_t matrix;
 
     nema_mat3x3_load_identity(matrix);
 
-    // The satellite body, the solar panels on each side and the booms.
+    //
+    // The ring: stroked in the main line width. The line width is shared VG state,
+    // so it is set here rather than relying on what the previous icon left behind.
+    //
     nema_vg_set_fill_rule(NEMA_VG_STROKE);
     nema_vg_paint_set_paint_color(g_hCcIconPaint, PAGE_MENU_ICON_COLOR);
+    nema_vg_stroke_set_width(PAGE_MENU_ICON_STROKE);
+    nema_vg_draw_circle(fCx, fCy, PAGE_MENU_NAV_RING_R,
+                        matrix, g_hCcIconPaint);
 
-    nema_vg_draw_line(fCx - 13.0f, fCy - 18.0f,
-                      fCx + 13.0f, fCy - 18.0f,
-                      matrix, g_hCcIconPaint);
-    nema_vg_draw_line(fCx + 13.0f, fCy - 18.0f,
-                      fCx + 13.0f, fCy + 18.0f,
-                      matrix, g_hCcIconPaint);
-    nema_vg_draw_line(fCx + 13.0f, fCy + 18.0f,
-                      fCx - 13.0f, fCy + 18.0f,
-                      matrix, g_hCcIconPaint);
-    nema_vg_draw_line(fCx - 13.0f, fCy + 18.0f,
-                      fCx - 13.0f, fCy - 18.0f,
-                      matrix, g_hCcIconPaint);
+    if ( g_hNavArrowPath == NULL )
+    {
+        return;
+    }
 
-    nema_vg_draw_line(fCx - 45.0f, fCy - 13.0f,
-                      fCx - 17.0f, fCy - 13.0f,
-                      matrix, g_hCcIconPaint);
-    nema_vg_draw_line(fCx - 17.0f, fCy - 13.0f,
-                      fCx - 17.0f, fCy + 13.0f,
-                      matrix, g_hCcIconPaint);
-    nema_vg_draw_line(fCx - 17.0f, fCy + 13.0f,
-                      fCx - 45.0f, fCy + 13.0f,
-                      matrix, g_hCcIconPaint);
-    nema_vg_draw_line(fCx - 45.0f, fCy + 13.0f,
-                      fCx - 45.0f, fCy - 13.0f,
-                      matrix, g_hCcIconPaint);
+    //
+    // The arrow: solid, accented in the same cyan as the brightness panel.
+    //
+    nema_mat3x3_rotate(matrix, -45.0f);
+    nema_mat3x3_translate(matrix,
+                          fCx - PAGE_MENU_NAV_ARROW_D,
+                          fCy + PAGE_MENU_NAV_ARROW_D);
+    nema_vg_path_set_matrix(g_hNavArrowPath, matrix);
 
-    nema_vg_draw_line(fCx + 17.0f, fCy - 13.0f,
-                      fCx + 45.0f, fCy - 13.0f,
-                      matrix, g_hCcIconPaint);
-    nema_vg_draw_line(fCx + 45.0f, fCy - 13.0f,
-                      fCx + 45.0f, fCy + 13.0f,
-                      matrix, g_hCcIconPaint);
-    nema_vg_draw_line(fCx + 45.0f, fCy + 13.0f,
-                      fCx + 17.0f, fCy + 13.0f,
-                      matrix, g_hCcIconPaint);
-    nema_vg_draw_line(fCx + 17.0f, fCy + 13.0f,
-                      fCx + 17.0f, fCy - 13.0f,
-                      matrix, g_hCcIconPaint);
-
-    nema_vg_draw_line(fCx - 17.0f, fCy,
-                      fCx - 13.0f, fCy,
-                      matrix, g_hCcIconPaint);
-    nema_vg_draw_line(fCx + 13.0f, fCy,
-                      fCx + 17.0f, fCy,
-                      matrix, g_hCcIconPaint);
-
-    // The GPS antenna and its three signal beams.
-    nema_vg_draw_line(fCx, fCy - 18.0f,
-                      fCx, fCy - 29.0f,
-                      matrix, g_hCcIconPaint);
-    nema_vg_draw_line(fCx, fCy - 29.0f,
-                      fCx - 11.0f, fCy - 40.0f,
-                      matrix, g_hCcIconPaint);
-    nema_vg_draw_line(fCx, fCy - 29.0f,
-                      fCx, fCy - 44.0f,
-                      matrix, g_hCcIconPaint);
-    nema_vg_draw_line(fCx, fCy - 29.0f,
-                      fCx + 11.0f, fCy - 40.0f,
-                      matrix, g_hCcIconPaint);
-
-    // Cell divisions on the solar panels, in thinner lines so the small icon does not blur together.
-    nema_vg_stroke_set_width(PAGE_MENU_DETAIL_STROKE);
-    nema_vg_draw_line(fCx - 31.0f, fCy - 13.0f,
-                      fCx - 31.0f, fCy + 13.0f,
-                      matrix, g_hCcIconPaint);
-    nema_vg_draw_line(fCx - 45.0f, fCy,
-                      fCx - 17.0f, fCy,
-                      matrix, g_hCcIconPaint);
-    nema_vg_draw_line(fCx + 31.0f, fCy - 13.0f,
-                      fCx + 31.0f, fCy + 13.0f,
-                      matrix, g_hCcIconPaint);
-    nema_vg_draw_line(fCx + 17.0f, fCy,
-                      fCx + 45.0f, fCy,
-                      matrix, g_hCcIconPaint);
-
-    // The satellite's GPS receiver is accented in the same cyan as the brightness panel.
     nema_vg_set_fill_rule(NEMA_VG_FILL_NON_ZERO);
     nema_vg_paint_set_paint_color(g_hCcIconPaint, PAGE_MENU_ACCENT_COLOR);
-    nema_vg_draw_circle(fCx, fCy, 6.0f,
-                        matrix, g_hCcIconPaint);
+    nema_vg_draw_path(g_hNavArrowPath, g_hCcIconPaint);
+}
+
+//
+// Weather icon: partly cloudy. A cyan outlined sun with eight rays at the upper
+// left, and a solid white cloud over it at the lower right.
+//
+// The cloud is drawn after the sun and is solid, so it covers the sun's lower
+// right corner and those rays -- no need to work out which rays to leave out.
+// The cloud is three circles plus a rounded rectangle that pulls their lower
+// edges into one flat base.
+//
+// About 84 x 64 px overall, the same class as the trend icon. All coordinates are
+// offsets from the icon centre.
+//
+static void
+page_menu_draw_weather_icon(float fCx, float fCy)
+{
+    static const float pfCloudX[3] = { -4.0f, 13.0f, 31.0f };
+    static const float pfCloudY[3] = { 19.0f,  9.0f, 21.0f };
+    static const float pfCloudR[3] = { 13.0f, 19.0f, 11.0f };
+
+    const float fSunX = fCx - 14.0f;
+    const float fSunY = fCy - 4.0f;
+
+    nema_matrix3x3_t matrix;
+    uint32_t         ui32Idx;
+
+    nema_mat3x3_load_identity(matrix);
+
+    //
+    // The sun: the circle in the main stroke width, the rays slightly thinner. The
+    // line width is shared VG state, so it is always set here.
+    //
+    nema_vg_set_fill_rule(NEMA_VG_STROKE);
+    nema_vg_paint_set_paint_color(g_hCcIconPaint, PAGE_MENU_ACCENT_COLOR);
+    nema_vg_stroke_set_width(PAGE_MENU_ICON_STROKE);
+    nema_vg_draw_circle(fSunX, fSunY, 12.0f, matrix, g_hCcIconPaint);
+
+    nema_vg_stroke_set_width(PAGE_MENU_RAY_STROKE);
+    for ( ui32Idx = 0; ui32Idx < 8U; ui32Idx++ )
+    {
+        float fCos = nema_cos(45.0f * (float)ui32Idx);
+        float fSin = nema_sin(45.0f * (float)ui32Idx);
+
+        nema_vg_draw_line(fSunX + (20.0f * fCos), fSunY + (20.0f * fSin),
+                          fSunX + (28.0f * fCos), fSunY + (28.0f * fSin),
+                          matrix, g_hCcIconPaint);
+    }
+
+    //
+    // The cloud: solid white.
+    //
+    nema_vg_set_fill_rule(NEMA_VG_FILL_NON_ZERO);
+    nema_vg_paint_set_paint_color(g_hCcIconPaint, PAGE_MENU_ICON_COLOR);
+
+    for ( ui32Idx = 0; ui32Idx < 3U; ui32Idx++ )
+    {
+        nema_vg_draw_circle(fCx + pfCloudX[ui32Idx], fCy + pfCloudY[ui32Idx],
+                            pfCloudR[ui32Idx], matrix, g_hCcIconPaint);
+    }
+
+    nema_vg_draw_rounded_rect(fCx + pfCloudX[0], fCy + pfCloudY[0],
+                              pfCloudX[2] - pfCloudX[0], 13.0f,
+                              6.0f, 6.0f, matrix, g_hCcIconPaint);
 }
 
 static void
@@ -2518,7 +2811,9 @@ page_menu_draw(void)
 
     page_menu_draw_trend_icon(PAGE_MENU_ICON_CX,
                               PAGE_MENU_ICON_CY(PAGE_MENU_ACT_TREND));
-    page_menu_draw_gps_icon(PAGE_MENU_ICON_CX,
+    page_menu_draw_weather_icon(PAGE_MENU_ICON_CX,
+                                PAGE_MENU_ICON_CY(PAGE_MENU_ACT_WEATHER));
+    page_menu_draw_nav_icon(PAGE_MENU_ICON_CX,
                             PAGE_MENU_ICON_CY(PAGE_MENU_ACT_MAP));
 }
 
@@ -4282,6 +4577,630 @@ draw_temp_status(temp_ble_view_e eView, uint32_t ui32Passkey)
 
 //*****************************************************************************
 //
+//! @brief Draw one line of text in the panel, shrinking it when it is too wide.
+//!
+//! @details Unlike draw_temp_line(), the available width is given by the caller
+//! (the panel is a rectangle, with no chord-width problem), and left / right
+//! alignment is supported -- the data rows put a label on the left and extra
+//! information on the right.
+//!
+//! It still measures and scales down proportionally when the text is too wide:
+//! the device and service names vary with the configuration, and on a
+//! rectangular panel text that overflows is not clipped but runs into the next
+//! column, which is harder to notice than clipping.
+//!
+//! @param pcStr      The string to draw
+//! @param fSize      The desired font size (pixels)
+//! @param fX         Left edge of the text box
+//! @param fW         Width of the text box
+//! @param fCy        Centre y of this line
+//! @param ui32Color  Text colour (ABGR)
+//! @param ui32AlignX NEMA_VG_ALIGNX_LEFT or NEMA_VG_ALIGNX_RIGHT
+//
+//*****************************************************************************
+static void
+btp_text(const char *pcStr, float fSize, float fX, float fW, float fCy,
+         uint32_t ui32Color, uint32_t ui32AlignX)
+{
+    float fTextW = 0.0f;
+    float fTextH = 0.0f;
+    float fBoxH;
+
+    if ( g_hBtIconPaint == NULL )
+    {
+        return;
+    }
+
+    //
+    // The font's glyphs are closed outlines to be filled, so the fill rule must be
+    // non-zero; the NEMA_VG_STROKE left behind by icon drawing would only trace the
+    // outlines (hollow text).
+    //
+    nema_vg_set_blend(NEMA_BL_SIMPLE);
+    nema_vg_set_fill_rule(NEMA_VG_FILL_NON_ZERO);
+
+    nema_vg_set_font_size(fSize);
+    (void)nema_vg_string_get_bbox(pcStr, &fTextW, &fTextH, (float)FB_RESX, 0);
+
+    //
+    // fTextW <= 0 means the measurement failed (a font or VG context problem):
+    // draw at the requested size without shrinking -- at least it is still a line
+    // of text, rather than an unbounded scale from dividing by 0.
+    //
+    if ( (fTextW > fW) && (fTextW > 1.0f) && (fW > 1.0f) )
+    {
+        fSize *= fW / fTextW;
+        nema_vg_set_font_size(fSize);
+    }
+
+    fBoxH = BTP_TEXT_BOX_H(fSize);
+
+    nema_vg_paint_set_paint_color(g_hBtIconPaint, ui32Color);
+    nema_vg_print(g_hBtIconPaint, pcStr,
+                  fX, fCy - (fBoxH / 2.0f),
+                  fW, fBoxH,
+                  ui32AlignX | NEMA_VG_ALIGNY_CENTER,
+                  NULL);
+}
+
+//*****************************************************************************
+//
+//! @brief Set the stroke style shared by the small icons.
+//!
+//! @details The VG context is shared, and the previous drawing (text, arcs, TSVG)
+//! may have changed the fill rule, line width and cap style, so all of it is
+//! reset before every icon.
+//!
+//! @param ui32Color Line colour (ABGR)
+//! @param fStrokeW  Line width
+//
+//*****************************************************************************
+static void
+btp_icon_begin(uint32_t ui32Color, float fStrokeW)
+{
+    nema_vg_set_blend(NEMA_BL_SIMPLE);
+    nema_vg_set_fill_rule(NEMA_VG_STROKE);
+    nema_vg_stroke_set_width(fStrokeW);
+    nema_vg_stroke_set_cap_style(NEMA_VG_CAP_ROUND, NEMA_VG_CAP_ROUND);
+    nema_vg_stroke_set_join_style(NEMA_VG_JOIN_ROUND);
+    nema_vg_paint_set_paint_color(g_hBtIconPaint, ui32Color);
+}
+
+//*****************************************************************************
+//
+//! @brief The Bluetooth icon of the title row.
+//!
+//! @details The same shape as g_hBtIconPath (the polyline in a 24x24 viewBox),
+//! but drawn here as line segments rather than reusing that path: the path's
+//! vertices are already scaled to 60 px, and shrinking it to 38 px would need a
+//! matrix, which scales the line width too -- the same reason given for the
+//! control centre icons.
+//!
+//! @param fCx       Centre x
+//! @param fCy       Centre y
+//! @param fSize     Side length (pixels), corresponding to the 24-unit viewBox
+//! @param ui32Color Line colour (ABGR)
+//
+//*****************************************************************************
+static void
+btp_icon_bt(float fCx, float fCy, float fSize, uint32_t ui32Color)
+{
+    //
+    // (12,12) is the centre of the viewBox, so every coordinate has 12 subtracted
+    // and is then scaled. The polyline's six vertices are, in order,
+    // (7,7) (17,17) (12,22) (12,2) (17,7) (7,17).
+    //
+    const float fS = fSize / 24.0f;
+
+    const float pfX[6] =
+    {
+        fCx + (-5.0f * fS), fCx + ( 5.0f * fS), fCx,
+        fCx,                fCx + ( 5.0f * fS), fCx + (-5.0f * fS)
+    };
+    const float pfY[6] =
+    {
+        fCy + (-5.0f * fS), fCy + ( 5.0f * fS), fCy + (10.0f * fS),
+        fCy + (-10.0f * fS), fCy + (-5.0f * fS), fCy + ( 5.0f * fS)
+    };
+
+    nema_matrix3x3_t matrix;
+    uint32_t         ui32Idx;
+
+    if ( g_hBtIconPaint == NULL )
+    {
+        return;
+    }
+
+    nema_mat3x3_load_identity(matrix);
+    btp_icon_begin(ui32Color, BTP_HEAD_ICON_W);
+
+    for ( ui32Idx = 0; ui32Idx < 5U; ui32Idx++ )
+    {
+        nema_vg_draw_line(pfX[ui32Idx], pfY[ui32Idx],
+                          pfX[ui32Idx + 1U], pfY[ui32Idx + 1U],
+                          matrix, g_hBtIconPaint);
+    }
+}
+
+//*****************************************************************************
+//
+//! @brief The four small icons of the data rows.
+//!
+//! @details All drawn by hand as a centre plus pixel offsets, within a box of
+//! about 22 x 22. The shapes are deliberately simple -- at 22 px detail only
+//! blurs together, and being recognisable as "watch / signal / thermometer /
+//! shield" is enough.
+//!
+//! @param fCx       Centre x
+//! @param fCy       Centre y
+//! @param ui32Color Line colour (ABGR)
+//
+//*****************************************************************************
+static void
+btp_icon_watch(float fCx, float fCy, uint32_t ui32Color)
+{
+    nema_matrix3x3_t matrix;
+
+    if ( g_hBtIconPaint == NULL )
+    {
+        return;
+    }
+
+    nema_mat3x3_load_identity(matrix);
+    btp_icon_begin(ui32Color, BTP_ICON_STROKE);
+
+    //
+    // The case.
+    //
+    nema_vg_draw_line(fCx - 7.0f, fCy - 7.0f, fCx + 7.0f, fCy - 7.0f,
+                      matrix, g_hBtIconPaint);
+    nema_vg_draw_line(fCx + 7.0f, fCy - 7.0f, fCx + 7.0f, fCy + 7.0f,
+                      matrix, g_hBtIconPaint);
+    nema_vg_draw_line(fCx + 7.0f, fCy + 7.0f, fCx - 7.0f, fCy + 7.0f,
+                      matrix, g_hBtIconPaint);
+    nema_vg_draw_line(fCx - 7.0f, fCy + 7.0f, fCx - 7.0f, fCy - 7.0f,
+                      matrix, g_hBtIconPaint);
+
+    //
+    // The straps, top and bottom.
+    //
+    nema_vg_draw_line(fCx - 4.0f, fCy - 7.0f, fCx - 4.0f, fCy - 11.0f,
+                      matrix, g_hBtIconPaint);
+    nema_vg_draw_line(fCx + 4.0f, fCy - 7.0f, fCx + 4.0f, fCy - 11.0f,
+                      matrix, g_hBtIconPaint);
+    nema_vg_draw_line(fCx - 4.0f, fCy + 7.0f, fCx - 4.0f, fCy + 11.0f,
+                      matrix, g_hBtIconPaint);
+    nema_vg_draw_line(fCx + 4.0f, fCy + 7.0f, fCx + 4.0f, fCy + 11.0f,
+                      matrix, g_hBtIconPaint);
+}
+
+static void
+btp_icon_signal(float fCx, float fCy, uint32_t ui32Color)
+{
+    //
+    // Four bars from short to tall, aligned at the bottom.
+    //
+    static const float pfDx[4]  = { -7.5f, -2.5f, 2.5f, 7.5f };
+    static const float pfTop[4] = {  4.0f,  0.0f, -4.5f, -9.0f };
+
+    nema_matrix3x3_t matrix;
+    uint32_t         ui32Idx;
+
+    if ( g_hBtIconPaint == NULL )
+    {
+        return;
+    }
+
+    nema_mat3x3_load_identity(matrix);
+    btp_icon_begin(ui32Color, BTP_ICON_STROKE);
+
+    for ( ui32Idx = 0; ui32Idx < 4U; ui32Idx++ )
+    {
+        nema_vg_draw_line(fCx + pfDx[ui32Idx], fCy + 9.0f,
+                          fCx + pfDx[ui32Idx], fCy + pfTop[ui32Idx],
+                          matrix, g_hBtIconPaint);
+    }
+}
+
+static void
+btp_icon_thermo(float fCx, float fCy, uint32_t ui32Color)
+{
+    nema_matrix3x3_t matrix;
+
+    if ( g_hBtIconPaint == NULL )
+    {
+        return;
+    }
+
+    nema_mat3x3_load_identity(matrix);
+    btp_icon_begin(ui32Color, BTP_ICON_STROKE);
+
+    //
+    // The tube and two graduations.
+    //
+    nema_vg_draw_line(fCx - 2.0f, fCy - 9.0f, fCx - 2.0f, fCy + 3.0f,
+                      matrix, g_hBtIconPaint);
+    nema_vg_draw_line(fCx + 3.0f, fCy - 6.0f, fCx + 6.0f, fCy - 6.0f,
+                      matrix, g_hBtIconPaint);
+    nema_vg_draw_line(fCx + 3.0f, fCy - 1.0f, fCx + 6.0f, fCy - 1.0f,
+                      matrix, g_hBtIconPaint);
+
+    //
+    // The bulb at the bottom. Solid, so it reads as a thermometer rather than a
+    // letter T.
+    //
+    draw_temp_circle(fCx - 2.0f, fCy + 6.5f, 4.0f, 0.0f, true, ui32Color);
+}
+
+static void
+btp_icon_shield(float fCx, float fCy, uint32_t ui32Color)
+{
+    //
+    // The shield outline's vertices, with the first repeated at the end so one
+    // loop closes the shape.
+    //
+    static const float pfDx[7] = { 0.0f, 8.0f, 8.0f, 0.0f, -8.0f, -8.0f, 0.0f };
+    static const float pfDy[7] =
+    {
+        -9.5f, -5.5f, 1.5f, 9.5f, 1.5f, -5.5f, -9.5f
+    };
+
+    nema_matrix3x3_t matrix;
+    uint32_t         ui32Idx;
+
+    if ( g_hBtIconPaint == NULL )
+    {
+        return;
+    }
+
+    nema_mat3x3_load_identity(matrix);
+    btp_icon_begin(ui32Color, BTP_ICON_STROKE);
+
+    for ( ui32Idx = 0; ui32Idx < 6U; ui32Idx++ )
+    {
+        nema_vg_draw_line(fCx + pfDx[ui32Idx], fCy + pfDy[ui32Idx],
+                          fCx + pfDx[ui32Idx + 1U], fCy + pfDy[ui32Idx + 1U],
+                          matrix, g_hBtIconPaint);
+    }
+
+    //
+    // The check mark in the middle.
+    //
+    nema_vg_draw_line(fCx - 3.5f, fCy - 0.5f, fCx - 1.0f, fCy + 2.5f,
+                      matrix, g_hBtIconPaint);
+    nema_vg_draw_line(fCx - 1.0f, fCy + 2.5f, fCx + 4.0f, fCy - 3.5f,
+                      matrix, g_hBtIconPaint);
+}
+
+//*****************************************************************************
+//
+//! @brief Convert an RSSI into a word and a colour.
+//!
+//! @details The thresholds are described at BTP_RSSI_*. A word is returned
+//! rather than only a colour because "-73 dBm" means nothing to most people --
+//! the word next to it is what actually gets read.
+//!
+//! @param i8Rssi     RSSI (dBm)
+//! @param pui32Color When non-NULL, receives the matching colour
+//!
+//! @return The word
+//
+//*****************************************************************************
+static const char *
+btp_rssi_quality(int8_t i8Rssi, uint32_t *pui32Color)
+{
+    const char *pcText;
+    uint32_t    ui32Color;
+
+    if ( i8Rssi >= BTP_RSSI_EXCELLENT )
+    {
+        pcText    = "Excellent";
+        ui32Color = BTP_GOOD_COLOR;
+    }
+    else if ( i8Rssi >= BTP_RSSI_GOOD )
+    {
+        pcText    = "Good";
+        ui32Color = BTP_ACCENT_COLOR;
+    }
+    else if ( i8Rssi >= BTP_RSSI_FAIR )
+    {
+        pcText    = "Fair";
+        ui32Color = BTP_WARN_COLOR;
+    }
+    else
+    {
+        pcText    = "Weak";
+        ui32Color = BTP_WEAK_COLOR;
+    }
+
+    if ( pui32Color != NULL )
+    {
+        *pui32Color = ui32Color;
+    }
+
+    return pcText;
+}
+
+//*****************************************************************************
+//
+//! @brief Draw one data row: label, value, and the separator below.
+//!
+//! @param ui32Row   Row index (from 0); decides y and whether to draw a separator
+//! @param pcLabel   The label
+//! @param pcValue   The value
+//! @param ui32Color Value colour (ABGR)
+//
+//*****************************************************************************
+static void
+btp_row(uint32_t ui32Row, const char *pcLabel, const char *pcValue,
+        uint32_t ui32Color)
+{
+    float fTop = BTP_ROW_Y(ui32Row);
+
+    btp_text(pcLabel, BTP_LABEL_FONT, BTP_ROW_TEXT_X, BTP_ROW_TEXT_W,
+             fTop + BTP_ROW_LABEL_DY, BTP_LABEL_COLOR, NEMA_VG_ALIGNX_LEFT);
+    btp_text(pcValue, BTP_VALUE_FONT, BTP_ROW_TEXT_X, BTP_ROW_TEXT_W,
+             fTop + BTP_ROW_VALUE_DY, ui32Color, NEMA_VG_ALIGNX_LEFT);
+
+    //
+    // No separator under the last row -- the card's edge is right there, and one
+    // more line would look like a missing row.
+    //
+    if ( ui32Row < (BTP_ROW_COUNT - 1U) )
+    {
+        nema_set_blend_fill(NEMA_BL_SIMPLE);
+        nema_fill_rect((int32_t)BTP_ROW_TEXT_X,
+                       (int32_t)(fTop + (float)BTP_ROW_H) - 1,
+                       (int32_t)BTP_ROW_TEXT_W, 1,
+                       BTP_SEP_COLOR);
+    }
+}
+
+//*****************************************************************************
+//
+//! @brief Draw the Bluetooth profile panel.
+//!
+//! @details The caller must already have bound the frame buffer and command list
+//! and drawn the background -- the panel is translucent and is laid over the
+//! temperature page with NEMA_BL_SIMPLE.
+//!
+//! Drawing order, bottom to top: handle -> panel -> card -> title row -> the
+//! four data rows.
+//!
+//! Every value comes from a single ble_link_info_get() snapshot, not one read per
+//! row: the fields must agree with each other, and separate reads could draw a
+//! combination such as "disconnected, but with an RSSI".
+//!
+//! A field that is not known is always drawn as "--". Better empty than a number
+//! that looks real -- the whole point of this panel is to show what the link is
+//! actually like.
+//
+//*****************************************************************************
+static void
+btp_draw(void)
+{
+    ble_link_info_t  sInfo;
+    temp_ble_view_e  eView;
+    nema_matrix3x3_t matrix;
+
+    char        pcBuf[24];
+    const char *pcText;
+    uint32_t    ui32StateColor;
+
+    ble_link_info_get(&sInfo);
+    eView = temp_ble_view_get(NULL);
+
+    //
+    // The handle at the top edge: a downward chevron hinting that a swipe up puts
+    // the panel away. It is outside the panel, so it is drawn first and the
+    // panel's translucent fill does not wash it out.
+    //
+    if ( g_hBtIconPaint != NULL )
+    {
+        nema_mat3x3_load_identity(matrix);
+        btp_icon_begin(BTP_IDLE_COLOR, BTP_CHEV_W);
+
+        nema_vg_draw_line(BTP_CHEV_CX - BTP_CHEV_HALF_W, BTP_CHEV_CY,
+                          BTP_CHEV_CX, BTP_CHEV_CY + BTP_CHEV_DROP,
+                          matrix, g_hBtIconPaint);
+        nema_vg_draw_line(BTP_CHEV_CX, BTP_CHEV_CY + BTP_CHEV_DROP,
+                          BTP_CHEV_CX + BTP_CHEV_HALF_W, BTP_CHEV_CY,
+                          matrix, g_hBtIconPaint);
+    }
+
+    //
+    // The translucent panel and the inner card.
+    //
+    nema_set_blend_fill(NEMA_BL_SIMPLE);
+    nema_fill_rounded_rect(BTP_PANEL_X, BTP_PANEL_Y,
+                           BTP_PANEL_W, BTP_PANEL_H,
+                           BTP_PANEL_R, BTP_PANEL_COLOR);
+    nema_fill_rounded_rect(BTP_CARD_X, BTP_CARD_Y,
+                           BTP_CARD_W, BTP_CARD_H,
+                           BTP_CARD_R, BTP_CARD_COLOR);
+
+    //
+    // The title row's state text. Pairing takes precedence over the connection,
+    // consistent with the Bluetooth icon (see temp_ble_view_get()): the user is
+    // looking at the dialog on the phone at that moment.
+    //
+    switch ( eView )
+    {
+        case TEMP_BLE_PAIRING:
+            pcText         = "PAIRING";
+            ui32StateColor = BTP_ACCENT_COLOR;
+            break;
+
+        case TEMP_BLE_PAIR_FAIL:
+            pcText         = "PAIRING ERROR";
+            ui32StateColor = BTP_WEAK_COLOR;
+            break;
+
+        case TEMP_BLE_PAIR_PASS:
+        case TEMP_BLE_CONNECTED:
+            pcText         = "CONNECTED";
+            ui32StateColor = BTP_ACCENT_COLOR;
+            break;
+
+        case TEMP_BLE_DISCONNECTED:
+        default:
+            pcText         = "DISCONNECTED";
+            ui32StateColor = BTP_IDLE_COLOR;
+            break;
+    }
+
+    btp_icon_bt(BTP_HEAD_ICON_CX, BTP_HEAD_ICON_CY, BTP_HEAD_ICON_SIZE,
+                sInfo.bConnected ? BTP_ACCENT_COLOR : BTP_IDLE_COLOR);
+
+    btp_text("Bluetooth", BTP_TITLE_FONT, BTP_HEAD_TEXT_X, BTP_HEAD_TEXT_W,
+             BTP_TITLE_CY, BTP_VALUE_COLOR, NEMA_VG_ALIGNX_LEFT);
+    btp_text(pcText, BTP_STATE_FONT, BTP_HEAD_TEXT_X, BTP_HEAD_TEXT_W,
+             BTP_STATE_CY, ui32StateColor, NEMA_VG_ALIGNX_LEFT);
+
+    //
+    // The status dot in the top right, replacing the design's switch -- a switch
+    // would suggest Bluetooth can be turned off, which this version cannot do. The
+    // outer ring is drawn only while connected, so "on" is visible at a glance.
+    //
+    if ( sInfo.bConnected )
+    {
+        draw_temp_circle(BTP_DOT_CX, BTP_DOT_CY, BTP_DOT_RING_R,
+                         BTP_DOT_RING_W, false,
+                         TEMP_WITH_ALPHA(BTP_ACCENT_COLOR, 0x80));
+    }
+
+    draw_temp_circle(BTP_DOT_CX, BTP_DOT_CY, BTP_DOT_R, 0.0f, true,
+                     sInfo.bConnected ? BTP_ACCENT_COLOR : BTP_IDLE_COLOR);
+
+    //
+    // Row 1: device name. Fixed at compile time (BLE_DEVICE_NAME in ble_pair.h)
+    // and shown whether connected or not -- it is "what this watch is called", not
+    // a property of the link.
+    //
+    btp_icon_watch(BTP_ROW_ICON_CX, BTP_ROW_Y(0) + BTP_ROW_ICON_DY,
+                   BTP_LABEL_COLOR);
+    btp_row(0, "DEVICE NAME", BLE_DEVICE_NAME, BTP_VALUE_COLOR);
+
+    //
+    // Row 2: RSSI. Read once a second by hts_main.c (TMPS_RSSI_TIMER_IND), and the
+    // whole parameter set is cleared on disconnect, so bRssiValid is all that
+    // needs checking here.
+    //
+    btp_icon_signal(BTP_ROW_ICON_CX, BTP_ROW_Y(1) + BTP_ROW_ICON_DY,
+                    (sInfo.bConnected && sInfo.bRssiValid) ?
+                        BTP_ACCENT_COLOR : BTP_LABEL_COLOR);
+
+    if ( sInfo.bConnected && sInfo.bRssiValid )
+    {
+        uint32_t    ui32QColor;
+        const char *pcQuality = btp_rssi_quality(sInfo.i8Rssi, &ui32QColor);
+
+        am_util_stdio_sprintf(pcBuf, "%d dBm", (int)sInfo.i8Rssi);
+        btp_row(1, "RSSI", pcBuf, BTP_VALUE_COLOR);
+
+        btp_text(pcQuality, BTP_LABEL_FONT, BTP_ROW_TEXT_X, BTP_ROW_TEXT_W,
+                 BTP_ROW_Y(1) + BTP_ROW_VALUE_DY, ui32QColor,
+                 NEMA_VG_ALIGNX_RIGHT);
+    }
+    else
+    {
+        btp_row(1, "RSSI", "--", BTP_IDLE_COLOR);
+    }
+
+    //
+    // Row 3: service. HTS (0x1809) is decided at compile time; see the
+    // advertising data in hts_main.c and svc_hts.c.
+    //
+    // The UUID is not drawn right-aligned as well: "Health Thermometer" already
+    // fills the row's width (and gets shrunk a little by btp_text()), so a
+    // right-aligned "0x1809" would sit right on top of its end.
+    //
+    btp_icon_thermo(BTP_ROW_ICON_CX, BTP_ROW_Y(2) + BTP_ROW_ICON_DY,
+                    BTP_LABEL_COLOR);
+    btp_row(2, "SERVICE", "Health Thermometer", BTP_VALUE_COLOR);
+
+    //
+    // Row 4: security. Three states must be told apart:
+    //
+    //   Paired (Bonded)  encrypted with an existing LTK, i.e. this phone paired before
+    //   Encrypted        paired and encrypted just now, in this connection
+    //   Not paired       connected but not yet encrypted (the phone has not started security)
+    //
+    btp_icon_shield(BTP_ROW_ICON_CX, BTP_ROW_Y(3) + BTP_ROW_ICON_DY,
+                    sInfo.bEncrypted ? BTP_GOOD_COLOR : BTP_LABEL_COLOR);
+
+    if ( !sInfo.bConnected )
+    {
+        btp_row(3, "SECURITY", "--", BTP_IDLE_COLOR);
+    }
+    else if ( sInfo.bBonded )
+    {
+        btp_row(3, "SECURITY", "Paired (Bonded)", BTP_GOOD_COLOR);
+    }
+    else if ( sInfo.bEncrypted )
+    {
+        btp_row(3, "SECURITY", "Encrypted", BTP_GOOD_COLOR);
+    }
+    else
+    {
+        btp_row(3, "SECURITY", "Not paired", BTP_WARN_COLOR);
+    }
+}
+
+#if WATCHFACE_ENABLE_TOUCH
+
+//*****************************************************************************
+//
+//! @brief Whether this point falls on the profile panel.
+//!
+//! @details The rounded corners are not handled separately: the few dozen pixels
+//! outside the corners count as "on the panel", which at worst means one tap that
+//! does not close the panel -- no real consequence.
+//!
+//! @param ui16X Touch x
+//! @param ui16Y Touch y
+//!
+//! @return true when inside the panel
+//
+//*****************************************************************************
+static bool
+btp_point_in_panel(uint16_t ui16X, uint16_t ui16Y)
+{
+    return ((ui16X >= BTP_PANEL_X) &&
+            (ui16X < (BTP_PANEL_X + BTP_PANEL_W)) &&
+            (ui16Y >= BTP_PANEL_Y) &&
+            (ui16Y < (BTP_PANEL_Y + BTP_PANEL_H)));
+}
+
+//*****************************************************************************
+//
+//! @brief Whether this point falls in the left or right back zone.
+//!
+//! @details The panel takes almost the whole width of the screen, so "tap
+//! outside the panel" leaves only 62 px on each side on this page -- too hard to
+//! hit. So the outer third on each side is the back zone, and a tap there counts
+//! even on the panel -- nothing on the panel is operable, so it cannot collide
+//! with any other action.
+//!
+//! The middle third deliberately does not close it: that is where the values are,
+//! and a finger resting there while reading should not make the panel disappear.
+//!
+//! @param ui16X Touch x
+//!
+//! @return true when inside a back zone
+//
+//*****************************************************************************
+static bool
+btp_point_in_back_zone(uint16_t ui16X)
+{
+    return ((ui16X < BTP_BACK_ZONE_W) ||
+            (ui16X >= (FB_RESX - BTP_BACK_ZONE_W)));
+}
+
+#endif // WATCHFACE_ENABLE_TOUCH
+
+//*****************************************************************************
+//
 //! @brief Draw the temperature page.
 //!
 //! @details Shows the TMP119 temperature from SensorTask's cache alongside the BLE
@@ -4421,6 +5340,16 @@ draw_temp(img_obj_t* fb, nema_cmdlist_t* cl)
     // The BLE status area.
     //
     draw_temp_status(eView, ui32Passkey);
+
+    //
+    // The Bluetooth profile panel (pulled down from the top edge). Over the gauge
+    // and the values, but under the brightness panel -- brightness is a global
+    // overlay and should cover everything on every page.
+    //
+    if ( g_bBtpOpen )
+    {
+        btp_draw();
+    }
 
     //
     // The brightness panel goes on top of the temperature page.
@@ -5864,6 +6793,22 @@ page_menu_hit_test(uint16_t ui16X, uint16_t ui16Y)
 #define MAP_HUD_TOP_Y       (44)
 #define MAP_HUD_R           (18)
 
+//
+// The top panel doubles as the pause button (see map_input_update()). Its tap
+// area is a size larger than the panel as drawn -- the panel is only 70 px tall,
+// which is small for a finger:
+//
+//   left / right  10 px wider on each side
+//   up            all the way to the screen edge; nothing else above the panel is tappable
+//   down          only 4 px more, to 118. Near the destination the car is drawn as high
+//                 as y = 119 (centre at most 136, see MAP_CAR_SCREEN_MIN_Y in
+//                 map_task.c; outer ring radius MAP_CAR_RING_R = 16), and any lower
+//                 would overlap where the car can appear
+//
+#define MAP_HUD_HIT_X0      (MAP_HUD_X - 10)                    // 94
+#define MAP_HUD_HIT_X1      (MAP_HUD_X + MAP_HUD_W + 10)        // 374
+#define MAP_HUD_HIT_Y1      (MAP_HUD_TOP_Y + MAP_HUD_H + 4)     // 118
+
 //*****************************************************************************
 //
 //! @brief The progress bar.
@@ -6128,9 +7073,15 @@ static void fsel_close(bool bApply);
 // overview is a purely touch feature and the whole section is left out when touch is
 // off, where keeping the declarations would give "declared static but never defined" warnings.
 //
+// Double tap to open the overview (dtap_*) is defined after the overview, while the
+// map page's tap handling and page changes call it -- the same reason, so it is
+// declared here too.
+//
 #if WATCHFACE_ENABLE_TOUCH
 static bool psel_active(void);
 static void psel_close(void);
+static void dtap_tap(const gesture_t *psGesture);
+static void dtap_reset(void);
 #endif
 
 //
@@ -6778,6 +7729,26 @@ draw_map(img_obj_t *fb, nema_cmdlist_t *cl)
 
 //*****************************************************************************
 //
+//! @brief Whether this point falls in the top panel's tap area (the pause button).
+//!
+//! @details The area is a size larger than the panel as drawn; see MAP_HUD_HIT_*.
+//!
+//! @param ui16X Touch x
+//! @param ui16Y Touch y
+//!
+//! @return true when inside the area
+//
+//*****************************************************************************
+static bool
+map_point_in_hud(uint16_t ui16X, uint16_t ui16Y)
+{
+    return ((ui16X >= MAP_HUD_HIT_X0) &&
+            (ui16X <  MAP_HUD_HIT_X1) &&
+            (ui16Y <  MAP_HUD_HIT_Y1));
+}
+
+//*****************************************************************************
+//
 //! @brief Touch handling for the map page.
 //!
 //! @details The gesture semantics of this page differ from the others, hence a branch
@@ -6964,27 +7935,60 @@ map_input_update(const gesture_t *psGesture)
 
         case GESTURE_TAP:
             //
-            // A tap anywhere on screen: stop while moving, resume while stopped; after
-            // arrival it restarts the whole navigation.
+            // A tap on the top panel (including its enlarged area, see
+            // MAP_HUD_HIT_*): stop while moving, resume while stopped; after
+            // arrival it restarts the whole navigation. The map can still be dragged
+            // while stopped, and stopping is usually exactly for dragging over to
+            // look at a junction.
             //
-            // Having no dedicated button is deliberate -- this is a watch, a round panel
-            // has little room for buttons to begin with, and "stop a moment to see the
-            // road ahead" is the most frequent action while navigating, which earns it
-            // the whole screen. The map can still be dragged while stopped, and
-            // stopping is usually exactly for dragging over to look at a junction.
+            // The pause button used to be the whole screen. It was narrowed to the
+            // top panel so that a single tap anywhere else does nothing -- a double
+            // tap there opens the page overview (as on the other pages). If a single
+            // tap still paused, the first half of a double tap would already have
+            // stopped the navigation, and the pause would have to be delayed; with
+            // two separate areas neither has to wait for the other. A side benefit:
+            // touching the screen by accident after arrival no longer restarts the
+            // whole route.
             //
-            // An accidental tap during a drag does not count: a press that moved past
-            // the threshold should trigger nothing at release, even if it is classified as a tap.
+            // Still no dedicated button is drawn: this is a watch, a round panel has
+            // little room for buttons, and the top panel is already there, showing
+            // the state (distance / PAUSED / ARRIVED). Two quick taps on the top
+            // panel pause and resume, and do not open the overview.
             //
-            if ( g_i32MapDragTotal < MAP_DRAG_MIN_PX )
+            // Two kinds of press are not taps -- they neither pause nor count towards
+            // a double tap:
+            //
+            //   accidental tap during a drag  a press that moved past the threshold
+            //                                 should trigger nothing at release, even
+            //                                 if it is classified as a tap.
+            //   two-finger gesture            when a pinch ends and the two fingers
+            //                                 lift one after the other, the last one
+            //                                 can start and end close together and be
+            //                                 classified as a tap. "Swallow one frame
+            //                                 on returning to one finger" above only
+            //                                 catches a simultaneous release.
+            //
+            // When the map is not drawn (PSRAM failed) there is no top panel either,
+            // and the whole screen belongs to the double tap.
+            //
+            if ( (g_i32MapDragTotal < MAP_DRAG_MIN_PX) &&
+                 (psGesture->ui8MaxFingers <= 1) )
             {
-                if ( sView.bArrived )
+                if ( sView.bReady &&
+                     map_point_in_hud(psGesture->ui16X, psGesture->ui16Y) )
                 {
-                    MapTaskRestart();
+                    if ( sView.bArrived )
+                    {
+                        MapTaskRestart();
+                    }
+                    else
+                    {
+                        MapTaskTogglePause();
+                    }
                 }
                 else
                 {
-                    MapTaskTogglePause();
+                    dtap_tap(psGesture);
                 }
             }
 
@@ -7014,13 +8018,18 @@ map_input_update(const gesture_t *psGesture)
 
         case GESTURE_SWIPE_DOWN:
             //
-            // Swipe down from the centre of the screen to leave this page.
+            // Swipe down from the centre of the screen to leave this page, back to the
+            // previous page (the weather page).
             //
             // The "swipe at the map boundary to change pages" path still works, but it
             // requires dragging the map all the way first -- leaving from the middle of a
             // route would take five or six swipes. The vertical direction has no other
             // use on this page at all (the world is as tall as the screen), which makes
             // it the right thing to use for leaving.
+            //
+            // It goes where "swipe right at the left boundary" goes, written as "the
+            // previous page" rather than naming one: that way the two ways out always
+            // lead to the same place, and reordering the pages needs no change here.
             //
             // The pull-down-from-the-top variant does not count: that is the control
             // centre's gesture, and although the control centre exists only on the home
@@ -7030,7 +8039,7 @@ map_input_update(const gesture_t *psGesture)
             {
                 g_bMapDragging    = false;
                 g_i32MapDragTotal = 0;
-                ui_page_set(UI_PAGE_TREND);
+                ui_page_set((ui_page_e)(g_ePage - 1));
                 return true;
             }
             break;
@@ -7065,7 +8074,7 @@ ui_page_set(ui_page_e ePage)
 {
     static const char * const pcPageNames[UI_PAGE_COUNT] =
     {
-        "home", "watch", "temp", "trend", "map"
+        "home", "watch", "temp", "trend", "weather", "map"
     };
 
     if ( (ePage >= UI_PAGE_COUNT) || (ePage == g_ePage) )
@@ -7089,6 +8098,14 @@ ui_page_set(ui_page_e ePage)
     g_bMapDragging    = false;
     g_bMapPinching    = false;
     g_i32MapDragTotal = 0;
+
+    //
+    // Drop the first half of a double tap: a tap on the previous page must not pair
+    // up with the next tap on this one. A page change by gesture breaks the
+    // sequence anyway, but a BTN1 page change does not go through a gesture, so it
+    // has to be cleared here.
+    //
+    dtap_reset();
 
     //
     // Entering the generated page pulls the animation's time base up to now.
@@ -7125,6 +8142,13 @@ ui_page_set(ui_page_e ePage)
     //
     g_bBlOpen = false;
     g_bBlDrag = false;
+
+    //
+    // The Bluetooth profile panel exists only on the temperature page, so a page
+    // change always closes it. Same reason as the control centre: coming back to
+    // the temperature page should not show an overlay left open last time.
+    //
+    g_bBtpOpen = false;
 
     //
     // The watch face selector exists only on the face page and is always closed on a page change.
@@ -7205,12 +8229,16 @@ page_menu_action_run(int32_t i32Action)
             ui_page_set(UI_PAGE_TREND);
             break;
 
+        case PAGE_MENU_ACT_WEATHER:
+            ui_page_set(UI_PAGE_WEATHER);
+            break;
+
         case PAGE_MENU_ACT_MAP:
             ui_page_set(UI_PAGE_MAP);
             break;
 
         default:
-            // A tap in the gap between the two entries keeps the menu open.
+            // A tap in the gap between entries keeps the menu open.
             break;
     }
 }
@@ -7431,6 +8459,7 @@ fsel_open(void)
     g_bBlDrag       = false;
     g_bMenuOpen     = false;
     g_bPageMenuOpen = false;
+    g_bBtpOpen      = false;
 
     am_util_debug_printf("[render] face sel: open (%s)\n",
                          g_sFaces[g_ui32Face].pcName);
@@ -7753,6 +8782,622 @@ fsel_draw(nema_img_obj_t *fb, nema_cmdlist_t *cl, float fSec)
 
 //*****************************************************************************
 //
+// The weather page (UI_PAGE_WEATHER).
+//
+// Three layers, bottom to top:
+//
+//   background  five plain skies (WTHRBG0..4.BIN). One is drawn at a time,
+//               panning slowly left and right with sub-pixel precision; after
+//               each sweep (WEATHER_SEG_MS), during the last WEATHER_XFADE_MS
+//               while the motion is nearly at rest, it slowly changes to the next.
+//   overlay     date, temperature, forecast cards and a fixed glow over the sun
+//               (WTHRUI.BIN, RGBA). Drawn by tools/weather_prep.py; never moves.
+//   clock       the time and the Bluetooth symbol, drawn every frame. The time
+//               comes from the same source as the watch face and the trend page.
+//
+// Why panning rather than a slideshow: at first five "overlay + sky" composites
+// cross-faded every 1.5 s, and on hardware that made you dizzy after a while --
+// the five cloud shapes differ a lot, the whole sky kept morphing, and the eye
+// found no direction of motion to follow. Real clouds drift slowly, so now one
+// image moves and changes only rarely; during the few seconds of a change the pan
+// is decelerating, both images sit at the same position, and only the cloud
+// shapes slowly change.
+//
+// Why the sun does not move with them: in all five backgrounds the sun is at
+// (234, 22). It would shift with the pan, but the overlay has an opaque white
+// glow at that same point covering it (see SUN_* in weather_prep.py), so it
+// looks like the clouds drift past under the sun.
+//
+// Why the layout looks like this: the composites were laid out on a square
+// canvas, so on hardware both ends of the forecast cards at the bottom were cut
+// off by the round screen, and the text at the top was too large. The overlay was
+// therefore laid out again: text one size smaller, the forecast cards scaled to
+// 0.82 and moved up, with all four corners inside the circle (the formula is in
+// the header of weather_prep.py).
+//
+// The assets relate to PSRAM the same way the map tiles do: read into PSRAM at
+// boot, sampled directly by the GPU (see psram.h).
+//
+//*****************************************************************************
+
+//
+// Where the assets sit in PSRAM: the five backgrounds, then the overlay, each 4 KB
+// aligned. The whole set must fit in the region psram.h gives the weather page.
+//
+#define WEATHER_BG_BYTES        (ASSET_WEATHER_W * ASSET_WEATHER_H * 2)
+#define WEATHER_UI_BYTES        (ASSET_WEATHER_UI_W * ASSET_WEATHER_UI_H * 4)
+#define WEATHER_ALIGN_4K(n)     ((((n) + 0xFFFU) / 0x1000U) * 0x1000U)
+#define WEATHER_BG_STRIDE       WEATHER_ALIGN_4K(WEATHER_BG_BYTES)
+#define WEATHER_BG_ADDR(i)      (PSRAM_WEATHER_BASE + (uint32_t)(i) * WEATHER_BG_STRIDE)
+#define WEATHER_UI_ADDR         WEATHER_BG_ADDR(ASSET_WEATHER_COUNT)
+
+typedef char weather_assets_fit_psram_region
+    [(((ASSET_WEATHER_COUNT * WEATHER_BG_STRIDE) +
+       WEATHER_ALIGN_4K(WEATHER_UI_BYTES)) <= PSRAM_WEATHER_SIZE) ? 1 : -1];
+
+//
+// The rhythm of panning and changing images.
+//
+//   WEATHER_PAN_PX    how far to move each way. One sweep covers twice that: 48 px
+//                     in 24 s, 2 px a second on average -- visibly moving, yet slow
+//                     enough to look like drifting cloud
+//   WEATHER_SEG_MS    how long one sweep takes. Both ends ease with a cosine, so the
+//                     speed drops to 0 at the ends before turning back
+//   WEATHER_XFADE_MS  the last part of each sweep, during which the next image fades in
+//
+// One round of all five takes 2 minutes.
+//
+#define WEATHER_PAN_PX          (24.0f)
+#define WEATHER_SEG_MS          (24000U)
+#define WEATHER_XFADE_MS        (5000U)
+
+//
+// The background must be 2 x WEATHER_PAN_PX wider than the screen so no edge shows
+// while panning, so it is drawn slightly enlarged. The scaling is anchored at the
+// sun (the same point as the overlay's glow), so the sun does not move up as a
+// result of the enlargement.
+//
+#define WEATHER_BG_SCALE        (((float)ASSET_WEATHER_W + (2.0f * WEATHER_PAN_PX)) / \
+                                 (float)ASSET_WEATHER_W)
+#define WEATHER_SUN_X           (234.0f)
+#define WEATHER_SUN_Y           (22.0f)
+
+//
+// Where the overlay lands on screen; must match UI_X/UI_Y in tools/weather_prep.py.
+//
+#define WEATHER_UI_X            (60)
+#define WEATHER_UI_Y            (0)
+
+//
+// How often missing assets are retried (only on the weather page, and only while
+// something is still missing). At most one file per retry -- about 30 ms for a
+// background and 40 ms for the overlay -- so the screen hitches briefly instead
+// of freezing.
+//
+#define WEATHER_RETRY_MS        (2000U)
+
+//
+// The clock: the time and the Bluetooth symbol are centred horizontally as one
+// group, with their vertical centre at WEATHER_TIME_CY.
+//
+// Size 28 makes the digits about 27 px tall, one size below the 34 px on the
+// composites -- back then the text at the top was too large and hugged the
+// circle's edge. The centre at 84 sits between the sun's glow (22) and the
+// overlay's date (114).
+//
+// The Bluetooth symbol is the polyline in a 24-unit viewBox (the same shape as
+// btp_icon_bt()), 10 units of the viewBox wide.
+//
+#define WEATHER_TIME_CY         (84.0f)
+#define WEATHER_TIME_FONT       (28.0f)
+#define WEATHER_TIME_BOLD_W     (1.6f)
+#define WEATHER_BT_H            (22.0f)
+#define WEATHER_BT_LINE_W       (2.8f)
+#define WEATHER_BT_GAP          (10.0f)
+
+//
+// The clock's halo. The time sits right on the edge of the sun's glow, where the
+// background is very bright, and white digits need a dark ring to be legible. The
+// GPU cannot blur, so several translucent dark blue strokes are layered from wide
+// to narrow, darker towards the glyphs -- these parameters were picked on a PC by
+// simulating with the same font outlines and comparing side by side with the
+// overlay's text.
+//
+#define WEATHER_TIME_COLOR      CC_ABGR(0xff, 0xff, 0xff, 0xff)
+#define WEATHER_HALO_COLOR(a)   CC_ABGR((a), 0x10, 0x28, 0x50)
+
+static const float   g_pfWeatherHaloW[]   = { 9.0f, 7.0f, 5.0f, 3.0f };
+static const uint8_t g_pui8WeatherHaloA[] = { 0x22, 0x28, 0x30, 0x30 };
+
+static const float   g_pfWeatherBtHaloW[]   = { 9.0f, 6.0f };
+static const uint8_t g_pui8WeatherBtHaloA[] = { 0x30, 0x40 };
+
+//
+// The background colour when there is not a single sky image: the same hue as the
+// sky, so it reads as "not loaded yet" rather than "crashed".
+//
+#define WEATHER_EMPTY_COLOR     CC_ABGR(0xff, 0x2a, 0x6c, 0xc4)
+
+//
+// Which assets have loaded, and when the last retry ran.
+//
+static bool     g_pbWeatherBgReady[ASSET_WEATHER_COUNT];
+static bool     g_bWeatherUiReady;
+static uint32_t g_ui32WeatherRetryTick;
+
+//*****************************************************************************
+//
+//! @brief Read one weather asset from eMMC into PSRAM.
+//!
+//! @details AssetStoreExists() first confirms the file is there at the right
+//! length, then it is read. A missing file is the normal case (not uploaded yet),
+//! and AssetStoreRead() logs a line on every failure, which would flood the log
+//! while retrying.
+//!
+//! The D-cache must be cleaned after reading, for the same reason as the map tiles
+//! (see map_tile_load_from_store() in map_task.c): bytes the CPU wrote may still
+//! sit in the cache, while the GPU reads the PSRAM itself.
+//!
+//! @param pcName    Asset file name
+//! @param ui32Addr  Destination address in PSRAM
+//! @param ui32Bytes Expected byte count
+//!
+//! @return true when the asset is now in PSRAM.
+//
+//*****************************************************************************
+static bool
+weather_asset_load(const char *pcName, uint32_t ui32Addr, uint32_t ui32Bytes)
+{
+    uint32_t ui32Start = xTaskGetTickCount();
+
+    am_hal_cachectrl_range_t sRange;
+
+    if ( !AssetStoreExists(pcName, ui32Bytes) )
+    {
+        return false;
+    }
+
+    if ( !AssetStoreRead(pcName, (void *)ui32Addr, ui32Bytes) )
+    {
+        return false;
+    }
+
+    sRange.ui32StartAddr = ui32Addr;
+    sRange.ui32Size      = ui32Bytes;
+    am_hal_cachectrl_dcache_clean(&sRange);
+
+    am_util_debug_printf("[weather] %s -> 0x%08X (%u ms)\n", pcName,
+                         (unsigned)ui32Addr,
+                         (unsigned)TICKS_TO_MS(xTaskGetTickCount() - ui32Start));
+
+    return true;
+}
+
+//*****************************************************************************
+//
+//! @brief Read in the weather assets that have not been loaded yet.
+//!
+//! @param ui32Max At most this many files this time: all of them at boot, 1 on a retry.
+//
+//*****************************************************************************
+static void
+weather_assets_load(uint32_t ui32Max)
+{
+    uint32_t ui32Tried = 0;
+    uint32_t i;
+    char     cName[16];
+
+    if ( (!psram_is_ready()) || (!AssetStoreIsReady()) )
+    {
+        return;
+    }
+
+    if ( (!g_bWeatherUiReady) && (ui32Tried < ui32Max) )
+    {
+        ui32Tried++;
+        g_bWeatherUiReady = weather_asset_load(ASSET_WEATHER_UI, WEATHER_UI_ADDR,
+                                               WEATHER_UI_BYTES);
+    }
+
+    for ( i = 0; i < ASSET_WEATHER_COUNT; i++ )
+    {
+        if ( g_pbWeatherBgReady[i] || (ui32Tried >= ui32Max) )
+        {
+            continue;
+        }
+
+        ui32Tried++;
+
+        //
+        // sprintf rather than snprintf: the SDK's snprintf writes no terminating NUL
+        // (see map_tile_load_from_store()). The longest name, "WTHRBG4.BIN", is 11
+        // characters.
+        //
+        am_util_stdio_sprintf(cName, ASSET_WEATHER_BG_FMT, (unsigned)i);
+        g_pbWeatherBgReady[i] = weather_asset_load(cName, WEATHER_BG_ADDR(i),
+                                                   WEATHER_BG_BYTES);
+    }
+}
+
+//*****************************************************************************
+//
+//! @brief While assets are missing, retry one of them every so often.
+//!
+//! @details Lets the user add the files with tools/asset_upload.py without a
+//! reboot.
+//!
+//! Nothing is read during an upload: the upload task holds the filesystem lock
+//! for the whole transfer (see AssetStoreWriteBegin() in asset_store.h), and
+//! competing for it would only stall RenderTask until that file is done.
+//
+//*****************************************************************************
+static void
+weather_assets_retry(void)
+{
+    bool     bMissing   = !g_bWeatherUiReady;
+    bool     bUploading = false;
+    uint32_t i;
+
+    for ( i = 0; i < ASSET_WEATHER_COUNT; i++ )
+    {
+        bMissing = bMissing || (!g_pbWeatherBgReady[i]);
+    }
+
+#if WATCHFACE_ASSET_UPLOAD
+    bUploading = AssetUploadIsActive();
+#endif
+
+    if ( (!bMissing) || bUploading ||
+         ((xTaskGetTickCount() - g_ui32WeatherRetryTick) <
+          pdMS_TO_TICKS(WEATHER_RETRY_MS)) )
+    {
+        return;
+    }
+
+    g_ui32WeatherRetryTick = xTaskGetTickCount();
+    weather_assets_load(1);
+}
+
+//*****************************************************************************
+//
+//! @brief Draw one background: enlarged to a little wider than the screen, then
+//! shifted horizontally by fPan.
+//!
+//! @details nema_blit_quad_fit() rather than nema_blit(): the four corners are
+//! floats and the GPU samples bilinearly, so moving only 1-2 px a second is still
+//! a continuous glide rather than a step at a time.
+//!
+//! @param ui32Idx   Background index
+//! @param fPan      Horizontal offset (px), -WEATHER_PAN_PX .. +WEATHER_PAN_PX
+//! @param ui32Alpha 0..255. 255 covers the whole screen; anything else is laid
+//!                  over the previous image (during a change)
+//
+//*****************************************************************************
+static void
+weather_bg_draw(uint32_t ui32Idx, float fPan, uint32_t ui32Alpha)
+{
+    float fW  = (float)ASSET_WEATHER_W * WEATHER_BG_SCALE;
+    float fH  = (float)ASSET_WEATHER_H * WEATHER_BG_SCALE;
+    float fX0 = WEATHER_SUN_X - (WEATHER_SUN_X * WEATHER_BG_SCALE) + fPan;
+    float fY0 = WEATHER_SUN_Y - (WEATHER_SUN_Y * WEATHER_BG_SCALE);
+
+    nema_bind_src_tex(WEATHER_BG_ADDR(ui32Idx), ASSET_WEATHER_W, ASSET_WEATHER_H,
+                      NEMA_RGB565, -1, NEMA_FILTER_BL);
+
+    if ( ui32Alpha >= 255U )
+    {
+        nema_set_blend_blit(NEMA_BL_SRC);
+    }
+    else
+    {
+        //
+        // The source is opaque RGB565 and the alpha comes entirely from the constant
+        // colour, so the blend is a linear interpolation of the two images (the same
+        // approach as TEST_BLEND_GLB_A in the SDK's nemagfx_performance_test).
+        //
+        nema_set_const_color((ui32Alpha << 24) | 0x00FFFFFFU);
+        nema_set_blend_blit(NEMA_BL_SIMPLE | NEMA_BLOP_MODULATE_A);
+    }
+
+    nema_blit_quad_fit(fX0,      fY0,
+                       fX0 + fW, fY0,
+                       fX0 + fW, fY0 + fH,
+                       fX0,      fY0 + fH);
+}
+
+//*****************************************************************************
+//
+//! @brief Print the time string from fX (left-aligned) with the current font
+//! settings.
+//!
+//! @details The halo, the fill and the bolding stroke all use the same string in
+//! the same box; they differ only in the fill rule, line width and colour set
+//! before the call. The box extends to the right edge of the screen so the text is
+//! never cut off by it.
+//
+//*****************************************************************************
+static void
+weather_time_print(const char *pcStr, float fX)
+{
+    float fBoxH = WEATHER_TIME_FONT * 2.0f;
+
+    nema_vg_print(g_hBtIconPaint, pcStr,
+                  fX, WEATHER_TIME_CY - (fBoxH / 2.0f),
+                  (float)FB_RESX - fX, fBoxH,
+                  NEMA_VG_ALIGNX_LEFT | NEMA_VG_ALIGNY_CENTER,
+                  NULL);
+}
+
+//*****************************************************************************
+//
+//! @brief Draw the Bluetooth symbol once (a polyline centred on fCx,
+//! WEATHER_TIME_CY) with the current line width and colour.
+//
+//*****************************************************************************
+static void
+weather_bt_lines(float fCx)
+{
+    //
+    // (12,12) is the centre of the viewBox; the vertices are, in order, (7,7)
+    // (17,17) (12,22) (12,2) (17,7) (7,17), the same as btp_icon_bt().
+    //
+    static const float pfVx[6] = { -5.0f,  5.0f,  0.0f,   0.0f,  5.0f, -5.0f };
+    static const float pfVy[6] = { -5.0f,  5.0f, 10.0f, -10.0f, -5.0f,  5.0f };
+
+    float            fS = WEATHER_BT_H / 24.0f;
+    nema_matrix3x3_t matrix;
+    uint32_t         i;
+
+    nema_mat3x3_load_identity(matrix);
+
+    for ( i = 0; i < 5U; i++ )
+    {
+        nema_vg_draw_line(fCx + (pfVx[i] * fS), WEATHER_TIME_CY + (pfVy[i] * fS),
+                          fCx + (pfVx[i + 1U] * fS),
+                          WEATHER_TIME_CY + (pfVy[i + 1U] * fS),
+                          matrix, g_hBtIconPaint);
+    }
+}
+
+//*****************************************************************************
+//
+//! @brief Draw the clock: the time and the Bluetooth symbol centred as a group,
+//! dark halo first, then white.
+//!
+//! @details Same format as the trend page's large clock ("%u:%02u", no leading
+//! zero). The text width is measured with nema_vg_string_get_bbox(): going from
+//! "3:00" to "10:47" adds a character, and the group stays centred.
+//!
+//! @param fSec Seconds since boot, WATCH_START_SEC already included
+//
+//*****************************************************************************
+static void
+weather_clock_draw(float fSec)
+{
+    char     pcBuf[8];
+    uint32_t ui32Total = (uint32_t)fSec;
+    float    fTextW    = 0.0f;
+    float    fTextH    = 0.0f;
+    float    fBtW      = WEATHER_BT_H * (10.0f / 24.0f);
+    float    fX;
+    float    fBtCx;
+    uint32_t i;
+
+    if ( g_hBtIconPaint == NULL )
+    {
+        return;
+    }
+
+    am_util_stdio_sprintf(pcBuf, "%u:%02u",
+                          (unsigned)((ui32Total / 3600U) % 24U),
+                          (unsigned)((ui32Total / 60U) % 60U));
+
+    nema_vg_set_blend(NEMA_BL_SIMPLE);
+    nema_vg_set_font_size(WEATHER_TIME_FONT);
+    (void)nema_vg_string_get_bbox(pcBuf, &fTextW, &fTextH, (float)FB_RESX, 0);
+
+    //
+    // If the measurement fails (a font or VG context problem) fTextW is 0, the
+    // group shrinks to just the symbol centred, and the time prints from the
+    // middle to the right -- at least the time is still on screen.
+    //
+    fX    = ((float)FB_RESX - (fTextW + WEATHER_BT_GAP + fBtW)) / 2.0f;
+    fBtCx = fX + fTextW + WEATHER_BT_GAP + (fBtW / 2.0f);
+
+    nema_vg_stroke_set_cap_style(NEMA_VG_CAP_ROUND, NEMA_VG_CAP_ROUND);
+    nema_vg_stroke_set_join_style(NEMA_VG_JOIN_ROUND);
+
+    //
+    // The halo: outlines only (NEMA_VG_STROKE), layered from wide to narrow. The
+    // inside of the glyphs is covered by the white later, so only the outer ring
+    // shows. The Bluetooth symbol's lines are strokes anyway, so the same approach
+    // applies.
+    //
+    nema_vg_set_fill_rule(NEMA_VG_STROKE);
+
+    for ( i = 0; i < (sizeof(g_pfWeatherHaloW) / sizeof(g_pfWeatherHaloW[0])); i++ )
+    {
+        nema_vg_paint_set_paint_color(g_hBtIconPaint,
+                                      WEATHER_HALO_COLOR(g_pui8WeatherHaloA[i]));
+        nema_vg_stroke_set_width(g_pfWeatherHaloW[i]);
+        weather_time_print(pcBuf, fX);
+    }
+
+    for ( i = 0; i < (sizeof(g_pfWeatherBtHaloW) / sizeof(g_pfWeatherBtHaloW[0])); i++ )
+    {
+        nema_vg_paint_set_paint_color(g_hBtIconPaint,
+                                      WEATHER_HALO_COLOR(g_pui8WeatherBtHaloA[i]));
+        nema_vg_stroke_set_width(g_pfWeatherBtHaloW[i]);
+        weather_bt_lines(fBtCx);
+    }
+
+    //
+    // White: the time is filled first (glyphs are closed outlines, so non-zero is
+    // required), then traced with a thin stroke to bolden it; the Bluetooth symbol
+    // is simply drawn in white lines.
+    //
+    nema_vg_paint_set_paint_color(g_hBtIconPaint, WEATHER_TIME_COLOR);
+
+    nema_vg_set_fill_rule(NEMA_VG_FILL_NON_ZERO);
+    weather_time_print(pcBuf, fX);
+
+    nema_vg_set_fill_rule(NEMA_VG_STROKE);
+    nema_vg_stroke_set_width(WEATHER_TIME_BOLD_W);
+    weather_time_print(pcBuf, fX);
+
+    nema_vg_stroke_set_width(WEATHER_BT_LINE_W);
+    weather_bt_lines(fBtCx);
+
+    //
+    // Back to filling, so text drawn after this (the brightness panel) does not come
+    // out hollow.
+    //
+    nema_vg_set_fill_rule(NEMA_VG_FILL_NON_ZERO);
+}
+
+//*****************************************************************************
+//
+//! @brief The fallback screen when there is not a single background: say why,
+//! rather than show black.
+//
+//*****************************************************************************
+static void
+weather_draw_unavailable(void)
+{
+    const char *pcReason;
+
+    if ( !psram_is_ready() )
+    {
+        pcReason = "PSRAM INIT FAILED";
+    }
+    else if ( !AssetStoreIsReady() )
+    {
+        pcReason = "eMMC NOT READY";
+    }
+    else
+    {
+        pcReason = "UPLOAD WTHRBG0-4 + WTHRUI";
+    }
+
+    nema_clear(WEATHER_EMPTY_COLOR);
+
+    map_text("WEATHER UNAVAILABLE", 24.0f, 0.0f, 300.0f, (float)FB_RESX, 40.0f,
+             NEMA_VG_ALIGNX_CENTER | NEMA_VG_ALIGNY_CENTER, WEATHER_TIME_COLOR);
+    map_text(pcReason, 18.0f, 0.0f, 336.0f, (float)FB_RESX, 32.0f,
+             NEMA_VG_ALIGNX_CENTER | NEMA_VG_ALIGNY_CENTER, WEATHER_TIME_COLOR);
+}
+
+//*****************************************************************************
+//
+//! @brief Draw the weather page.
+//!
+//! @details Background -> overlay -> clock -> brightness panel, bottom to top.
+//!
+//! Only the backgrounds that have loaded take part: with some missing there are
+//! simply fewer, and the fallback screen appears only when there are none at all.
+//! Without the overlay there is just the sky and the clock. The animation phase
+//! is computed straight from the time since boot, with no state -- coming back to
+//! this page does not "start from the beginning".
+//!
+//! @param fb   The target framebuffer
+//! @param cl   The command list. Rewound and submitted in here, but not waited on
+//! @param fSec This frame's time (seconds since boot plus the start offset), for the clock
+//
+//*****************************************************************************
+static void
+draw_weather(nema_img_obj_t *fb, nema_cmdlist_t *cl, float fSec)
+{
+    uint32_t pui32Ready[ASSET_WEATHER_COUNT];
+    uint32_t ui32Count = 0;
+    uint32_t i;
+
+    weather_assets_retry();
+
+    for ( i = 0; i < ASSET_WEATHER_COUNT; i++ )
+    {
+        if ( g_pbWeatherBgReady[i] )
+        {
+            pui32Ready[ui32Count++] = i;
+        }
+    }
+
+    nema_cl_rewind(cl);
+    nema_cl_bind_circular(cl);
+
+    nema_bind_dst_tex(fb->bo.base_phys, fb->w, fb->h, fb->format, fb->stride);
+    nema_set_clip(0, 0, fb->w, fb->h);
+
+    nema_vg_bind_font(&DejaVuSans_ttf_kern);
+
+    if ( ui32Count == 0 )
+    {
+        weather_draw_unavailable();
+    }
+    else
+    {
+        //
+        // The phase is computed in ticks throughout, never converted to milliseconds:
+        // TICKS_TO_MS() multiplies by 1000 before dividing and overflows 71 minutes
+        // after boot, which would make the animation jump. The tick count itself
+        // takes 49 days to wrap.
+        //
+        uint32_t ui32Seg  = pdMS_TO_TICKS(WEATHER_SEG_MS);
+        uint32_t ui32Fade = pdMS_TO_TICKS(WEATHER_XFADE_MS);
+        uint32_t ui32Now  = xTaskGetTickCount();
+        uint32_t ui32Turn = ui32Now / ui32Seg;      // which sweep this is
+        uint32_t ui32In   = ui32Now % ui32Seg;      // ticks into this sweep
+        float    fPan;
+
+        //
+        // Even sweeps go left to right, odd sweeps right to left, easing with a
+        // cosine at both ends: the speed is 0 at each end and the next sweep turns
+        // back from the same position, so the motion on screen is continuous.
+        //
+        fPan = WEATHER_PAN_PX * nema_cos(180.0f * (float)ui32In / (float)ui32Seg);
+        if ( (ui32Turn & 1U) == 0U )
+        {
+            fPan = -fPan;
+        }
+
+        weather_bg_draw(pui32Ready[ui32Turn % ui32Count], fPan, 255U);
+
+        if ( (ui32Count > 1U) && (ui32In > (ui32Seg - ui32Fade)) )
+        {
+            uint32_t ui32Alpha = ((ui32In - (ui32Seg - ui32Fade)) * 255U) / ui32Fade;
+
+            weather_bg_draw(pui32Ready[(ui32Turn + 1U) % ui32Count], fPan,
+                            ui32Alpha);
+        }
+
+        if ( g_bWeatherUiReady )
+        {
+            nema_bind_src_tex(WEATHER_UI_ADDR,
+                              ASSET_WEATHER_UI_W, ASSET_WEATHER_UI_H,
+                              NEMA_RGBA8888, -1, NEMA_FILTER_PS);
+            nema_set_blend_blit(NEMA_BL_SIMPLE);
+            nema_blit(WEATHER_UI_X, WEATHER_UI_Y);
+        }
+    }
+
+    weather_clock_draw(fSec);
+
+    //
+    // The brightness panel is a global feature and can be pulled up on this page too.
+    //
+    if ( g_bBlOpen )
+    {
+        bl_draw();
+    }
+
+    //
+    // Both exits share this one submit. What happens when it is missed is described
+    // at the end of draw_map().
+    //
+    nema_cl_submit(cl);
+}
+
+//*****************************************************************************
+//
 //! @brief Draw the given page into the framebuffer.
 //!
 //! @details Extracted from the main loop's if/else chain, because the page overview also
@@ -7811,6 +9456,14 @@ draw_page(ui_page_e ePage, nema_img_obj_t *fb, nema_cmdlist_t *cl, float fSec)
         // The tiles come from PSRAM; the position and navigation information from MapTask.
         //
         draw_map(fb, cl);
+    }
+    else if ( ePage == UI_PAGE_WEATHER )
+    {
+        //
+        // The images come from PSRAM; the time comes from the same source as the
+        // watch face and the trend page.
+        //
+        draw_weather(fb, cl, fSec);
     }
     else if ( ePage == UI_PAGE_DESIGN )
     {
@@ -7995,6 +9648,15 @@ psel_open(void)
     g_bPageMenuOpen = false;
     g_bBlOpen       = false;
     g_bBlDrag       = false;
+    g_bBtpOpen      = false;
+
+    //
+    // Drop the first half of a double tap too. While the overview is open every
+    // gesture is swallowed by psel_input(), so no new first tap is recorded; but
+    // BTN0 opens and closes the overview without a gesture, so a tap left over from
+    // before it opened could pair up with the next tap after it closes.
+    //
+    dtap_reset();
 
     g_ePsel             = PSEL_ENTER;
     g_ui32PselTick      = xTaskGetTickCount();
@@ -8351,15 +10013,204 @@ psel_compose(nema_img_obj_t *fb, nema_cmdlist_t *cl)
 
 //*****************************************************************************
 //
+// Double tap opens the page overview (dtap).
+//
+// The same overview as BTN0 (psel_open()), just a way to reach it without the
+// button. Open only, never close: while the overview is open every gesture is
+// intercepted by psel_input(), where a tap zooms back in.
+//
+// Only taps that "mean nothing else" count: taps on the ordinary pages (home,
+// watch, temperature, trend) while the overlays are closed, and taps on the map
+// page outside the top panel. Taps consumed by an overlay, the selector or the
+// map's top panel do not count, and do not become the first half of a double tap
+// either.
+//
+// A single tap in those places does nothing anyway, so the overview opens as soon
+// as the second tap is released, without delaying any single tap to wait for a
+// second one. Narrowing the map's pause button to the top panel was done exactly
+// so the map page meets this condition too (see map_input_update()).
+//
+// The times are the press / release ticks recorded by TouchTask, not the moment
+// RenderTask receives the gesture; the reason is at ui32DownTick in gesture_t.
+//
+//*****************************************************************************
+
+//
+// Thresholds. These are starting values to be tuned on hardware: successes and
+// near misses both print the measured values (see dtap_tap()), so tune from the
+// log.
+//
+//   press duration of each tap            <= DTAP_MAX_PRESS_MS   longer is a hold, not a tap
+//   first release to second press          DTAP_MIN_GAP_MS ~ DTAP_MAX_GAP_MS
+//   distance between the two release points <= DTAP_MAX_DIST
+//
+// The lower bound on the gap rejects one tap split into two by unsteady contact:
+// the touch IC reports every 17 ms, such a gap is only one or two report periods,
+// and a genuine double tap is never that fast.
+//
+#define DTAP_MAX_PRESS_MS   (300)
+#define DTAP_MIN_GAP_MS     (40)
+#define DTAP_MAX_GAP_MS     (300)
+#define DTAP_MAX_DIST       (60)
+
+//
+// The "near miss" range: only pairs whose gap is within twice the limit, yet that
+// did not qualify, are logged. That gives numbers to tune with, without flooding
+// the log during ordinary single taps.
+//
+#define DTAP_NEAR_GAP_MS    (DTAP_MAX_GAP_MS * 2)
+
+//
+// A sequence number for every discrete gesture, incremented by ui_input_update()
+// before any branch (see dtap_note_gesture()).
+//
+// A double tap requires the two taps to be adjacent gestures: anything in between
+// -- a swipe, a tap consumed by an overlay -- breaks it. Comparing sequence
+// numbers means no branch has to remember to clear the state on its own.
+//
+static uint32_t g_ui32DtapSeq;
+
+//
+// The first half of a double tap: the most recent tap that "meant nothing else".
+//
+typedef struct
+{
+    bool     bValid;
+    uint32_t ui32Seq;       // which gesture it was
+    uint32_t ui32UpTick;    // when it was released
+    uint16_t ui16X;         // where it was released
+    uint16_t ui16Y;
+} dtap_first_t;
+
+static dtap_first_t g_sDtapFirst;
+
+//*****************************************************************************
+//
+//! @brief Drop the first half of a double tap.
+//!
+//! @details Called on a page change (ui_page_set()) and when the overview opens
+//! (psel_open()) -- both can happen without a gesture (BTN1, BTN0), so the
+//! sequence number does not catch them. BTN0 / BTN1 always reach one of the two;
+//! the only case that reaches neither is BTN1 on the home page with the overview
+//! closed, which changes nothing and needs no reset.
+//
+//*****************************************************************************
+static void
+dtap_reset(void)
+{
+    g_sDtapFirst.bValid = false;
+}
+
+//*****************************************************************************
+//
+//! @brief Number this discrete gesture.
+//!
+//! @details Called by ui_input_update() before any branch, so gestures swallowed
+//! by the overview or an overlay are counted too -- a gap in the sequence is what
+//! breaks a double tap. Frames without a gesture (GESTURE_NONE) do not count.
+//!
+//! @param psGesture This frame's gesture
+//
+//*****************************************************************************
+static void
+dtap_note_gesture(const gesture_t *psGesture)
+{
+    if ( psGesture->eType != GESTURE_NONE )
+    {
+        g_ui32DtapSeq++;
+    }
+}
+
+//*****************************************************************************
+//
+//! @brief Handle a tap that "means nothing else": paired with the previous one it
+//! opens the overview, otherwise it is kept as the first half.
+//!
+//! @details There are only two callers: GESTURE_TAP on an ordinary page in
+//! ui_input_update(), and taps outside the top panel in map_input_update().
+//!
+//! @param psGesture This tap (eType is GESTURE_TAP)
+//
+//*****************************************************************************
+static void
+dtap_tap(const gesture_t *psGesture)
+{
+    uint32_t ui32Press = psGesture->ui32UpTick - psGesture->ui32DownTick;
+
+    //
+    // A press with two or more fingers is not a tap (see ui8MaxFingers in
+    // gesture_t): it cannot be a first half, and it breaks the one before it.
+    //
+    if ( psGesture->ui8MaxFingers > 1 )
+    {
+        dtap_reset();
+        return;
+    }
+
+    if ( g_sDtapFirst.bValid &&
+         ((g_sDtapFirst.ui32Seq + 1U) == g_ui32DtapSeq) )
+    {
+        uint32_t ui32Gap  = psGesture->ui32DownTick - g_sDtapFirst.ui32UpTick;
+        int32_t  i32Dx    = (int32_t)psGesture->ui16X - (int32_t)g_sDtapFirst.ui16X;
+        int32_t  i32Dy    = (int32_t)psGesture->ui16Y - (int32_t)g_sDtapFirst.ui16Y;
+        int32_t  i32Dist2 = (i32Dx * i32Dx) + (i32Dy * i32Dy);
+
+        if ( (ui32Press <= pdMS_TO_TICKS(DTAP_MAX_PRESS_MS)) &&
+             (ui32Gap   >= pdMS_TO_TICKS(DTAP_MIN_GAP_MS)) &&
+             (ui32Gap   <= pdMS_TO_TICKS(DTAP_MAX_GAP_MS)) &&
+             (i32Dist2  <= (DTAP_MAX_DIST * DTAP_MAX_DIST)) )
+        {
+            am_util_debug_printf("[render] double tap -> overview (gap %u ms, %u px)\n",
+                                 (unsigned)TICKS_TO_MS(ui32Gap),
+                                 (unsigned)sqrtf((float)i32Dist2));
+            dtap_reset();
+            psel_open();
+            return;
+        }
+
+        if ( ui32Gap <= pdMS_TO_TICKS(DTAP_NEAR_GAP_MS) )
+        {
+            am_util_debug_printf("[render] double tap missed (gap %u ms, %u px, press %u ms)\n",
+                                 (unsigned)TICKS_TO_MS(ui32Gap),
+                                 (unsigned)sqrtf((float)i32Dist2),
+                                 (unsigned)TICKS_TO_MS(ui32Press));
+        }
+    }
+
+    //
+    // Not a pair. A press that lasted too long cannot be a first half; anything else
+    // becomes the new first half.
+    //
+    if ( ui32Press > pdMS_TO_TICKS(DTAP_MAX_PRESS_MS) )
+    {
+        dtap_reset();
+        return;
+    }
+
+    g_sDtapFirst.bValid     = true;
+    g_sDtapFirst.ui32Seq    = g_ui32DtapSeq;
+    g_sDtapFirst.ui32UpTick = psGesture->ui32UpTick;
+    g_sDtapFirst.ui16X      = psGesture->ui16X;
+    g_sDtapFirst.ui16Y      = psGesture->ui16Y;
+}
+
+//*****************************************************************************
+//
 //! @brief Update the UI state machine from a gesture.
 //!
-//! @details Four modes; the open state of the three overlays decides what a gesture means:
+//! @details Five modes; the open state of the four overlays decides what a gesture means:
 //!
 //!   Brightness panel open (possible on every page)
 //!       hold the slider -> adjust the brightness continuously (updated every frame during the hold, not at release)
 //!       swipe down      -> close the panel
 //!       tap outside     -> close the panel
 //!       anything else   -> ignored
+//!
+//!   Bluetooth profile panel open (temperature page only)
+//!       tap the left / right third -> close the panel
+//!       tap outside the panel      -> close the panel
+//!       swipe up / left / right    -> close the panel
+//!       anything else              -> ignored
 //!
 //!   Control centre open (home page only)
 //!       tap a cell      -> perform that cell's action
@@ -8370,16 +10221,24 @@ psel_compose(nema_img_obj_t *fb, nema_cmdlist_t *cl)
 //!                          and one way out of the menu is easier to understand.
 //!
 //!   Quick page menu open (home page only)
-//!       tap an entry    -> go to UI_PAGE_TREND or UI_PAGE_MAP
+//!       tap an entry    -> go to UI_PAGE_TREND, UI_PAGE_WEATHER or UI_PAGE_MAP
 //!       tap outside     -> close the menu
 //!       swipe left      -> close the menu
 //!       anything else   -> ignored
 //!
 //!   All three closed
 //!       swipe left      -> next page
-//!       swipe right     -> open the quick page menu on the home page; go back a page elsewhere
-//!       swipe down      -> open the control centre, only on the home page and only when the swipe started at the top edge
+//!       swipe right     -> open the quick page menu on the home page; go back a page elsewhere.
+//!                          The map page is the exception: horizontal swipes drag the map, and
+//!                          only a right swipe at the left boundary goes back a page (see
+//!                          map_input_update())
+//!       swipe down      -> from the top edge: the control centre on the home page, the
+//!                          Bluetooth profile panel on the temperature page; the face
+//!                          selector on the watch page; from the centre of the map page:
+//!                          back a page
 //!       swipe up        -> open the brightness panel when the swipe started at the bottom edge (on every page)
+//!       double tap      -> open the page overview, the same as BTN0 (see dtap_tap()). On
+//!                          the map page only outside the top panel, which is the pause button
 //!
 //! The brightness panel is tested first, because it is the only overlay that has to react
 //! during a hold; the control centre and page changes only act at release.
@@ -8397,6 +10256,12 @@ psel_compose(nema_img_obj_t *fb, nema_cmdlist_t *cl)
 static void
 ui_input_update(const gesture_t *psGesture)
 {
+    //
+    // Number this gesture first: the double-tap check relies on it to confirm that
+    // no other gesture came between the two taps. It has to come before every
+    // branch, so gestures swallowed by the overview or an overlay are counted too.
+    //
+    dtap_note_gesture(psGesture);
     //
     // The face selector comes before everyone: it is a full-screen modal layer, and while
     // it is open not even the brightness panel should be reachable. While closed this
@@ -8468,6 +10333,48 @@ ui_input_update(const gesture_t *psGesture)
                 {
                     g_bBlOpen = false;
                     am_util_debug_printf("[render] bl: closed (tap outside)\n");
+                }
+                break;
+
+            default:
+                break;
+        }
+
+        return;
+    }
+
+    if ( g_bBtpOpen )
+    {
+        //
+        // Nothing on the panel is operable (disconnect / reconnect are not
+        // implemented yet), so there is only one outcome here: close it. All four
+        // routes are accepted, so the user does not have to guess the right gesture.
+        //
+        // Left and right swipes close it too: page changes are blocked while the
+        // panel is open, and if a left swipe did nothing at all it would look like a
+        // hang. Closing the panel is the only response that makes sense here.
+        //
+        switch ( psGesture->eType )
+        {
+            case GESTURE_SWIPE_UP:
+            case GESTURE_SWIPE_LEFT:
+            case GESTURE_SWIPE_RIGHT:
+                g_bBtpOpen = false;
+                am_util_debug_printf("[render] bt profile: closed (swipe)\n");
+                break;
+
+            case GESTURE_TAP:
+                //
+                // A back zone on either side, or any point outside the panel. The
+                // panel takes almost the whole screen, and "tap outside the panel"
+                // alone would leave only 62 px on each side (see
+                // btp_point_in_back_zone()).
+                //
+                if ( btp_point_in_back_zone(psGesture->ui16X) ||
+                     !btp_point_in_panel(psGesture->ui16X, psGesture->ui16Y) )
+                {
+                    g_bBtpOpen = false;
+                    am_util_debug_printf("[render] bt profile: closed (tap)\n");
                 }
                 break;
 
@@ -8562,9 +10469,13 @@ ui_input_update(const gesture_t *psGesture)
     {
         case GESTURE_TAP:
             //
-            // Only the generated page needs taps: with the overlays closed, the other three pages have nothing to tap.
+            // On the generated page taps go to the generated widgets; on the other pages
+            // (home, watch, temperature, trend) a tap does nothing while the overlays are
+            // closed, so it goes to the double-tap check -- a double tap opens the page
+            // overview (see dtap_tap()). Taps on the map page were already handled by
+            // map_input_update() above and never reach this point.
             //
-            // The release position (ui16X/ui16Y) is passed, consistent with the control
+            // For the generated page the release position (ui16X/ui16Y) is passed, consistent with the control
             // centre's hit test, and needs no conversion: the Designer's canvas is 454x454
             // (the circle the watch actually shows), smaller than the FB, but code
             // generation already centres the whole canvas on the framebuffer (see
@@ -8576,13 +10487,19 @@ ui_input_update(const gesture_t *psGesture)
             // There is no need to check whether the generated side initialized
             // successfully -- uninitialized, it always returns false and triggers no callback.
             //
-            // The generated page has left the carousel (see ui_page_e) and this branch is currently unreachable.
+            // The generated page has left the carousel (see ui_page_e), so its branch is
+            // currently unreachable. If it is re-enabled, taps on that page belong to the
+            // generated widgets and take no part in double taps.
             //
             if ( g_ePage == UI_PAGE_DESIGN )
             {
                 (void)ui_designer_touch(UI_SCENE_DEFAULT,
                                         (int32_t)psGesture->ui16X,
                                         (int32_t)psGesture->ui16Y);
+            }
+            else
+            {
+                dtap_tap(psGesture);
             }
             break;
 
@@ -8629,7 +10546,29 @@ ui_input_update(const gesture_t *psGesture)
                 g_bPageMenuOpen = false;
                 g_bBlOpen       = false;
                 g_bBlDrag       = false;
+                g_bBtpOpen      = false;
                 am_util_debug_printf("[render] cc: opened\n");
+            }
+            else if ( (g_ePage == UI_PAGE_TEMP) &&
+                      (psGesture->ui16MinY <= CC_PULL_START_MAX_Y) )
+            {
+                //
+                // Pulling down from the top edge on the temperature page opens the
+                // Bluetooth profile panel.
+                //
+                // The start restriction shares CC_PULL_START_MAX_Y with the control
+                // centre, with the same meaning -- a drawer pulled down from the top.
+                // The condition uses the highest point of the trace (ui16MinY) rather
+                // than the start, for the same reason as the brightness panel: the
+                // start is the first sampled position, not where the finger really
+                // came down, and a fast swipe drifts out of the edge band.
+                //
+                g_bBtpOpen      = true;
+                g_bMenuOpen     = false;
+                g_bPageMenuOpen = false;
+                g_bBlOpen       = false;
+                g_bBlDrag       = false;
+                am_util_debug_printf("[render] bt profile: opened\n");
             }
             break;
 
@@ -8657,6 +10596,7 @@ ui_input_update(const gesture_t *psGesture)
                 g_bMenuOpen     = false;
                 g_bPageMenuOpen = false;
                 g_bBlDrag       = false;
+                g_bBtpOpen      = false;
 
                 am_util_debug_printf("[render] bl: opened (level 0x%02x)\n",
                                      backlight_get_level());
@@ -8843,6 +10783,13 @@ RenderTask(void *pvParameters)
     // To see what each face actually uses, switch faces once: faces_dump() hangs off the
     // moment of applying, by which time RTT is idle.
     //
+
+    //
+    // The weather page's assets (five backgrounds and the overlay): eMMC -> PSRAM,
+    // about 200 ms in total. Anything that cannot be read yet (not uploaded) is
+    // retried once the weather page is shown (see weather_assets_retry()).
+    //
+    weather_assets_load(ASSET_WEATHER_COUNT + 1U);
 
 
 #if WATCHFACE_SHOW_WEATHER_ICON

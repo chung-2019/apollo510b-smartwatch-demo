@@ -107,6 +107,22 @@ TARGETS = {
     "MAPTILE0.BIN": (468, 468, "RGB565"),
     "MAPTILE1.BIN": (468, 468, "RGB565"),
     "MAPTILE2.BIN": (468, 468, "RGB565"),
+    #
+    # The weather page. Produced as a whole by tools/weather_prep.py.
+    #
+    # The backgrounds are src/Generate_3/weather_cloud_0N.png (plain sky, no
+    # overlay); the overlay is weather_overlay.png drawn by that tool, and its size
+    # must match ASSET_WEATHER_UI_W/H in src/asset_store.h.
+    #
+    # Do not use original/weather_ui_0N.png as a background: those are composites
+    # of overlay and sky, and with the overlay on top the text would appear twice.
+    #
+    "WTHRBG0.BIN":  (468, 468, "RGB565"),
+    "WTHRBG1.BIN":  (468, 468, "RGB565"),
+    "WTHRBG2.BIN":  (468, 468, "RGB565"),
+    "WTHRBG3.BIN":  (468, 468, "RGB565"),
+    "WTHRBG4.BIN":  (468, 468, "RGB565"),
+    "WTHRUI.BIN":   (348, 392, "RGBA"),
 }
 
 

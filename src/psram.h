@@ -56,6 +56,30 @@ extern "C"
 
 //*****************************************************************************
 //
+//! @brief How the PSRAM is divided.
+//!
+//! @details Each user has a fixed, non-overlapping region, listed here rather
+//! than scattered across the .c files -- otherwise a new user cannot see what the
+//! others already occupy:
+//!
+//!     0x60000000  map tile cache        map_task.c     3 slots x 428 KB = 1.25 MB
+//!     0x60400000  weather page assets   render_task.c  5 backgrounds x 428 KB
+//!                                                      + 536 KB overlay = 2.62 MB
+//!
+//! Each region reserves 4 MB, far more than it uses today: the number of tile
+//! cache slots follows the map's minimum zoom (see MAP_CACHE_SLOTS in
+//! map_task.h), and 64 MB can spare it. Each user checks at compile time that it
+//! stays inside its own region.
+//
+//*****************************************************************************
+#define PSRAM_MAP_BASE          (PSRAM_XIP_BASE)
+#define PSRAM_MAP_SIZE          (4 * 1024 * 1024)
+
+#define PSRAM_WEATHER_BASE      (PSRAM_MAP_BASE + PSRAM_MAP_SIZE)
+#define PSRAM_WEATHER_SIZE      (4 * 1024 * 1024)
+
+//*****************************************************************************
+//
 //! @brief Initialize MSPI0 and the PSRAM, then switch to XIP mode.
 //!
 //! @details Three steps in order: DDR timing scan, device init, enable XIP. The

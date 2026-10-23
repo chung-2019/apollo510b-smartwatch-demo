@@ -350,6 +350,8 @@ TouchTask(void *pvParameters)
     uint16_t ui16LastY    = 0;
     uint16_t ui16MinY     = 0;
     uint16_t ui16MaxY     = 0;
+    uint32_t ui32DownTick  = 0;
+    uint8_t  ui8MaxFingers = 0;
 
 #if TOUCH_INT_RATE_DEBUG
     //
@@ -563,6 +565,9 @@ TouchTask(void *pvParameters)
                 ui16StartY = sState.y;
                 ui16MinY   = sState.y;
                 ui16MaxY   = sState.y;
+
+                ui32DownTick  = (uint32_t)xTaskGetTickCount();
+                ui8MaxFingers = 0;
             }
 
             //
@@ -581,6 +586,16 @@ TouchTask(void *pvParameters)
             {
                 ui16MaxY = sState.y;
             }
+
+            //
+            // The most fingers held at once over the whole press. Looking only at
+            // the moment of release is not enough: after a pinch the two fingers
+            // usually lift one after the other, so only one is left at the end.
+            //
+            if ( sState.ui8Fingers > ui8MaxFingers )
+            {
+                ui8MaxFingers = sState.ui8Fingers;
+            }
         }
         else if ( bPrevPressed )// The instant of release, where sState.pressed = 0
         {
@@ -595,6 +610,10 @@ TouchTask(void *pvParameters)
             sGesture.ui16StartY = ui16StartY;
             sGesture.ui16MinY   = ui16MinY;
             sGesture.ui16MaxY   = ui16MaxY;
+
+            sGesture.ui32DownTick  = ui32DownTick;
+            sGesture.ui32UpTick    = (uint32_t)xTaskGetTickCount();
+            sGesture.ui8MaxFingers = ui8MaxFingers;
 
             touch_gesture_classify(&sGesture);
 

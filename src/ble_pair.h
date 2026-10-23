@@ -4,9 +4,16 @@
 //!
 //! @brief BLE state bridge: written by the BLE side, read by the display side.
 //!
-//! It currently carries two things: whether a connection is up (for drawing the
-//! Bluetooth icon) and the progress and result of Numeric Comparison pairing.
-//! Both are one-way data: RadioTask writes, RenderTask reads.
+//! It currently carries three things: whether a connection is up (for drawing the
+//! Bluetooth icon), the progress and result of Numeric Comparison pairing, and
+//! this link's parameters (connection interval, PHY, encryption / bonding, RSSI).
+//! All three are one-way data: RadioTask writes, RenderTask reads.
+//!
+//! The link parameters feed the temperature page's Bluetooth profile panel
+//! (pulled down from the top; see the BTP_* section of render_task.c). The panel
+//! only displays and offers no controls, so this file has only setters and one
+//! getter that reads everything at once -- nothing that asks the peer to change
+//! a parameter.
 //!
 //! Pairing was changed from Just Works to LE Secure Connections Numeric
 //! Comparison (six-digit confirmation). Three things must hold at once (see
@@ -35,6 +42,53 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+
+//*****************************************************************************
+//
+//! @brief The device name, shared by advertising and the GAP Device Name.
+//!
+//! It lives here rather than in hts_main.c because the temperature page's
+//! Bluetooth profile panel shows it too. Both sides use this one macro, so a
+//! rename is still a one-line change.
+//
+//*****************************************************************************
+#define BLE_DEVICE_NAME         "EdgePilot-510B"
+
+//*****************************************************************************
+//
+//! @brief PHY codes.
+//!
+//! The values match the Core Spec's LE PHY Update Complete event (1 = LE 1M,
+//! 2 = LE 2M, 3 = LE Coded), not the HCI_PHY_LE_*_BIT masks in hci_defs.h --
+//! those are for the "preferred PHYs" fields, where Coded is 4 rather than 3, and
+//! mixing the two shows the wrong PHY.
+//
+//*****************************************************************************
+#define BLE_LINK_PHY_NONE       (0)
+#define BLE_LINK_PHY_1M         (1)
+#define BLE_LINK_PHY_2M         (2)
+#define BLE_LINK_PHY_CODED      (3)
+
+//*****************************************************************************
+//
+//! @brief A snapshot of this link's parameters.
+//!
+//! An unknown field is left at its "invalid" value rather than guessed: the panel
+//! would rather show "--" than a number that looks real. Each field's invalid
+//! value is noted below.
+//
+//*****************************************************************************
+typedef struct
+{
+    bool     bConnected;        // whether a link is up; when false the rest is meaningless
+    bool     bEncrypted;        // the link is encrypted (DM_SEC_ENCRYPT_IND)
+    bool     bBonded;           // encrypted with an existing LTK, i.e. this phone is bonded
+    bool     bRssiValid;        // whether i8Rssi has been read yet
+    int8_t   i8Rssi;            // the most recent RSSI reading (dBm)
+    uint16_t ui16ConnInterval;  // connection interval in 1.25 ms units; 0 = unknown
+    uint8_t  ui8TxPhy;          // BLE_LINK_PHY_*; BLE_LINK_PHY_NONE = unknown
+    uint8_t  ui8RxPhy;          // likewise
+} ble_link_info_t;
 
 //*****************************************************************************
 //
@@ -116,5 +170,79 @@ extern bool ble_pair_conn_is_open(void);
 //
 //*****************************************************************************
 extern ble_pair_state_e ble_pair_state_get(uint32_t *pui32Passkey);
+
+//*****************************************************************************
+//
+//! @brief Record the connection interval.
+//!
+//! @param ui16Interval Connection interval, in units of 1.25 ms
+//!
+//! Called on DM_CONN_OPEN_IND and DM_CONN_UPDATE_IND. Both are needed: the link
+//! opens with the parameters the peer proposed, after which AppSlaveProcDmMsg()
+//! requests an update according to tmpsUpdateCfg, and the value actually in
+//! effect is only known at DM_CONN_UPDATE_IND.
+//
+//*****************************************************************************
+extern void ble_link_interval_set(uint16_t ui16Interval);
+
+//*****************************************************************************
+//
+//! @brief Record the negotiated PHY.
+//!
+//! @param ui8TxPhy Transmit PHY (BLE_LINK_PHY_*)
+//! @param ui8RxPhy Receive PHY (BLE_LINK_PHY_*)
+//!
+//! Called on DM_PHY_UPDATE_IND. Without that event the link stays on the default
+//! LE 1M, which is why ble_link_conn_begin() starts both at BLE_LINK_PHY_1M.
+//
+//*****************************************************************************
+extern void ble_link_phy_set(uint8_t ui8TxPhy, uint8_t ui8RxPhy);
+
+//*****************************************************************************
+//
+//! @brief Record the encryption and bonding state.
+//!
+//! @param bEncrypted true when the link is encrypted
+//! @param bBonded    true when an existing LTK was used (a bonded phone reconnecting)
+//
+//*****************************************************************************
+extern void ble_link_sec_set(bool bEncrypted, bool bBonded);
+
+//*****************************************************************************
+//
+//! @brief Record the most recent RSSI reading.
+//!
+//! @param i8Rssi The value reported by HCI Read RSSI (dBm)
+//
+//*****************************************************************************
+extern void ble_link_rssi_set(int8_t i8Rssi);
+
+//*****************************************************************************
+//
+//! @brief A link has opened: reset the parameters to this link's starting values.
+//!
+//! @param ui16Interval The connection interval carried by DM_CONN_OPEN_IND
+//!
+//! The PHY is set to LE 1M (the Core Spec's initial PHY for a connection),
+//! encryption and bonding are cleared, and the RSSI is marked as not yet read.
+//! Nothing carries over from the previous link -- that would make the panel show
+//! the old phone's numbers for the first second after a reconnect.
+//
+//*****************************************************************************
+extern void ble_link_conn_begin(uint16_t ui16Interval);
+
+//*****************************************************************************
+//
+//! @brief Get a snapshot of the current link parameters.
+//!
+//! @param psInfo Where to write it; must not be NULL
+//!
+//! Read as one block rather than one getter per field: the fields have to be
+//! consistent with each other (when bConnected is false, nothing should still
+//! hold the previous link's values), and reading them separately could let the
+//! screen assemble a combination that never existed.
+//
+//*****************************************************************************
+extern void ble_link_info_get(ble_link_info_t *psInfo);
 
 #endif // BLE_PAIR_H

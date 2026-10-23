@@ -43,7 +43,15 @@ TaskHandle_t MapTaskHandle;
 //*****************************************************************************
 #define MAP_TILE_BYTES          (MAP_TILE_W * MAP_TILE_H * 2)
 #define MAP_SLOT_STRIDE         (((MAP_TILE_BYTES + 0xFFF) / 0x1000) * 0x1000)
-#define MAP_SLOT_ADDR(slot)     (PSRAM_XIP_BASE + (uint32_t)(slot) * MAP_SLOT_STRIDE)
+#define MAP_SLOT_ADDR(slot)     (PSRAM_MAP_BASE + (uint32_t)(slot) * MAP_SLOT_STRIDE)
+
+//
+// The whole cache must stay inside the region psram.h gives the map, or it would
+// overwrite the weather page's images that follow. The slot count is derived
+// from the minimum zoom (MAP_CACHE_SLOTS), so a change there is checked here.
+//
+typedef char map_cache_fits_psram_region
+    [((MAP_CACHE_SLOTS * MAP_SLOT_STRIDE) <= PSRAM_MAP_SIZE) ? 1 : -1];
 
 //*****************************************************************************
 //

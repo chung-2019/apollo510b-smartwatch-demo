@@ -73,9 +73,22 @@ static int         g_i32FailCode;
 // not even "two FILs used separately" is safe, because the FATFS object holds a
 // shared sector buffer. Every path into FatFs must go through this lock.
 //
-// While assets are loaded at boot the scheduler has not started; g_xLock is NULL
-// then and lock/unlock are skipped -- that phase is single-threaded by
-// construction. The lock is created only after AssetStoreInit() succeeds.
+// During boot provisioning (AssetProvisionRun()) the scheduler has not started;
+// g_xLock is NULL then and lock/unlock are skipped -- that phase is
+// single-threaded by construction. The lock is created by AssetStoreLockInit(),
+// called from setup_task() before any task that touches assets is created.
+//
+// Why not create it in AssetStoreInit(): creating a mutex before the scheduler
+// starts enters a critical section, and before that point the Cortex-M port's
+// nesting count is not 0, so leaving it does not unmask interrupts again -- the
+// provisioning that follows (writing eMMC) and psram_init() would both run with
+// interrupts masked. In setup_task() the scheduler is already running, so the
+// problem does not arise.
+//
+// (The lock used to be declared but never created, so lock/unlock did nothing,
+// and the read and write functions did not call store_lock() either. MapTask
+// reading tiles, RenderTask reading assets and the upload task writing files
+// could therefore all be inside FatFs at once. Fixed on 2026-10-04.)
 //
 //*****************************************************************************
 static SemaphoreHandle_t g_xLock;
@@ -355,6 +368,32 @@ AssetStoreGetFailure(const char **ppcStage)
 
 //*****************************************************************************
 //
+// Create the filesystem mutex.
+//
+//*****************************************************************************
+void
+AssetStoreLockInit(void)
+{
+    //
+    // With the filesystem not mounted nobody enters FatFs, so there is nothing to
+    // protect. Calling this twice is harmless.
+    //
+    if ( (!g_bStoreReady) || (g_xLock != NULL) )
+    {
+        return;
+    }
+
+    g_xLock = xSemaphoreCreateMutex();
+
+    if ( g_xLock == NULL )
+    {
+        am_util_debug_printf("[asset] lock create failed (heap %u B free)\n",
+                             (unsigned)xPortGetFreeHeapSize());
+    }
+}
+
+//*****************************************************************************
+//
 // Whether an asset file exists with the correct length.
 //
 //*****************************************************************************
@@ -425,9 +464,12 @@ AssetStoreRead(const char *pcName, void *pvBuf, uint32_t ui32Size)
         return false;
     }
 
+    store_lock();
+
     eRes = f_open(&g_sFile, pcName, FA_READ);
     if ( eRes != FR_OK )
     {
+        store_unlock();
         am_util_debug_printf("[asset] %s: open failed (%d)\n", pcName,
                              (int)eRes);
         return false;
@@ -479,9 +521,12 @@ AssetStoreWrite(const char *pcName, const void *pvBuf, uint32_t ui32Size)
         return false;
     }
 
+    store_lock();
+
     eRes = f_open(&g_sFile, pcName, FA_CREATE_ALWAYS | FA_WRITE);
     if ( eRes != FR_OK )
     {
+        store_unlock();
         am_util_debug_printf("[asset] %s: create failed (%d)\n", pcName,
                              (int)eRes);
         return false;

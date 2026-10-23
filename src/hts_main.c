@@ -101,8 +101,23 @@ enum
 {
   TMPS_TM_TIMER_IND = TMPS_MSG_START,      /*! Temperature measurement timer expired */
   TMPS_BATT_TIMER_IND,                     /*! Battery measurement timer expired */
-  TMPS_LED_TIMER_IND                       /*! Status LED blink timer expired */
+  TMPS_LED_TIMER_IND,                      /*! Status LED blink timer expired */
+  TMPS_RSSI_TIMER_IND                      /*! RSSI sampling timer expired */
 };
+
+/*! RSSI sampling period (ms).
+ *
+ *  Runs only while connected and stops on disconnect. The temperature page's
+ *  Bluetooth profile panel shows the signal strength, and HCI Read RSSI is a
+ *  one-question-one-answer command with no automatic reporting, so it has to be
+ *  polled.
+ *
+ *  1 s was chosen for that one row of the panel: faster shows no difference,
+ *  slower lags behind when the phone is carried away. The cost is one HCI
+ *  command per second, negligible next to the HTS indication on the same period
+ *  -- with a 15-30 ms connection interval the device wakes every few tens of
+ *  milliseconds anyway. */
+#define TMPS_RSSI_PERIOD_MS          1000
 
 /**************************************************************************************************
   Data types
@@ -294,9 +309,12 @@ static const eattCfg_t fiteattCfg =
 
 /*! Device name: used both for the scan response packet (shown in scan lists) and
  *  for the GAP Device Name (read after connecting). The two must agree, or a
- *  phone shows one name while scanning and another once connected. This line is
- *  the only place to change. */
-#define TMPS_DEVICE_NAME  "EdgePilot-510B"
+ *  phone shows one name while scanning and another once connected.
+ *
+ *  The definition itself moved to BLE_DEVICE_NAME in ble_pair.h: the temperature
+ *  page's Bluetooth profile panel shows the same name, and render_task.c cannot
+ *  see this file's macros. A rename is still a one-line change there. */
+#define TMPS_DEVICE_NAME  BLE_DEVICE_NAME
 
 // For power testing only: fill the advertising data to the full 31 bytes
 #if POWER_CONSUMPTION_TEST
@@ -419,6 +437,7 @@ wsfHandlerId_t tmpsHandlerId;
 
 /*! BLE status LED: blink timer and whether advertising is in progress */
 static wsfTimer_t tmpsLedTimer;
+static wsfTimer_t tmpsRssiTimer;
 static bool_t     tmpsAdvActive;
 
 
@@ -772,6 +791,30 @@ static void tmpsProcMsg(tmpsMsg_t *pMsg)
       WsfTimerStartMs(&tmpsLedTimer, TMPS_LED_BLINK_MS);
       break;
 
+    case TMPS_RSSI_TIMER_IND:
+      /* RSSI sampling tick: send one HCI Read RSSI to the controller; the result
+       * comes back as DM_CONN_READ_RSSI_IND.
+       *
+       * No check that the link is still up: the timer is already stopped at
+       * DM_CONN_CLOSE_IND, and DmConnReadRssi() ignores an invalid connId anyway.
+       *
+       * The next tick is scheduled here rather than when the result arrives --
+       * if the controller ever failed to answer, waiting for the result would
+       * stop the sampling for good. */
+      DmConnReadRssi((dmConnId_t) pMsg->hdr.param);
+      WsfTimerStartMs(&tmpsRssiTimer, TMPS_RSSI_PERIOD_MS);
+      break;
+
+    case DM_CONN_READ_RSSI_IND:
+      /* The result of HCI Read RSSI. With a non-zero status the value means
+       * nothing and is dropped: the panel keeps showing the last valid reading,
+       * which beats showing a fake 0 dBm. */
+      if (pMsg->dm.readRssi.status == HCI_SUCCESS)
+      {
+        ble_link_rssi_set(pMsg->dm.readRssi.rssi);
+      }
+      break;
+
     case ATTS_HANDLE_VALUE_CNF:
       /* Only one indication may be outstanding at a time, so the next measurement
        * is scheduled once the confirmation arrives. HtpsMeasComplete() already
@@ -903,6 +946,21 @@ static void tmpsProcMsg(tmpsMsg_t *pMsg)
       ble_pair_reset();
       ble_pair_conn_set(true);
 
+      //
+      // Hand the link's starting parameters to the display (the temperature
+      // page's Bluetooth profile panel). The interval here is the one the peer
+      // proposed; AppSlaveProcDmMsg() then requests an update according to
+      // tmpsUpdateCfg, and DM_CONN_UPDATE_IND fills in the value in effect.
+      //
+      ble_link_conn_begin(pMsg->dm.connOpen.connInterval);
+
+      //
+      // Start sampling the RSSI periodically. The connId goes into the timer
+      // message's param and comes back when it expires.
+      //
+      tmpsRssiTimer.msg.param = pMsg->hdr.param;
+      WsfTimerStartMs(&tmpsRssiTimer, TMPS_RSSI_PERIOD_MS);
+
       // AppSlaveSecurityReq(1);  // Request security on connection ID 1 (currently disabled)
       uiEvent = APP_UI_CONN_OPEN;
       tmpsAdvActive = FALSE;
@@ -940,15 +998,39 @@ static void tmpsProcMsg(tmpsMsg_t *pMsg)
         ble_pair_reset();
         ble_pair_conn_set(false);
 
+        //
+        // Stop sampling the RSSI. Asking the controller after a disconnect only
+        // returns an error and costs a needless wakeup; the link parameters
+        // themselves were already cleared by ble_pair_conn_set(false).
+        //
+        WsfTimerStop(&tmpsRssiTimer);
+
         tmpsClose(pMsg);
         uiEvent = APP_UI_CONN_CLOSE;
         tmpsLedUpdate();
       }
       break;
 
+    case DM_CONN_UPDATE_IND:
+      /* The connection parameter update completed. This is the interval actually
+       * in effect -- DM_CONN_OPEN_IND carries what the peer first proposed, after
+       * which AppSlaveProcDmMsg() asks for 15-30 ms according to tmpsUpdateCfg.
+       * A non-zero status means the peer refused and the old value still holds,
+       * so do not overwrite it. */
+      if (pMsg->dm.connUpdate.status == HCI_SUCCESS)
+      {
+        ble_link_interval_set(pMsg->dm.connUpdate.connInterval);
+      }
+      break;
+
     case DM_PHY_UPDATE_IND:
       /* PHY update complete; status is the result, rxPhy / txPhy the negotiated receive / transmit PHY. */
       APP_TRACE_INFO3("DM_PHY_UPDATE_IND status: %d, RX: %d, TX: %d", pMsg->dm.phyUpdate.status,pMsg->dm.phyUpdate.rxPhy, pMsg->dm.phyUpdate.txPhy);
+
+      if (pMsg->dm.phyUpdate.status == HCI_SUCCESS)
+      {
+        ble_link_phy_set(pMsg->dm.phyUpdate.txPhy, pMsg->dm.phyUpdate.rxPhy);
+      }
       break;
 
     case DM_SEC_PAIR_CMPL_IND:
@@ -984,6 +1066,12 @@ static void tmpsProcMsg(tmpsMsg_t *pMsg)
        * temperature indications earlier in this connection, send one measurement
        * immediately rather than waiting for the next TMPS_TM_TIMER_IND. */
       uiEvent = APP_UI_SEC_ENCRYPT;
+
+      /* usingLtk means an existing LTK was used, i.e. this phone was bonded
+       * before; the encryption right after a first pairing has it FALSE. The
+       * profile panel uses the difference to tell "Paired (Bonded)" from
+       * "Encrypted". */
+      ble_link_sec_set(true, (pMsg->dm.encryptInd.usingLtk != FALSE));
       if(AttsCccEnabled((dmConnId_t) pMsg->dm.hdr.param, TMPS_HTS_TM_CCC_IDX))
       {
         APP_TRACE_INFO0("encrypted, ccc enabled\r\n");
@@ -994,6 +1082,7 @@ static void tmpsProcMsg(tmpsMsg_t *pMsg)
     case DM_SEC_ENCRYPT_FAIL_IND:
       /* Encryption failed; only the UI is updated, and sending measurements still waits on security and CCC state. */
       uiEvent = APP_UI_SEC_ENCRYPT_FAIL;
+      ble_link_sec_set(false, false);
       break;
 
     case DM_SEC_AUTH_REQ_IND:
@@ -1156,6 +1245,13 @@ static void tmpsTimersInit(wsfHandlerId_t handlerId)
   /* Status LED blink timer; the measurement timers are managed inside the profiles */
   tmpsLedTimer.handlerId = handlerId;
   tmpsLedTimer.msg.event = TMPS_LED_TIMER_IND;
+
+  /* The RSSI sampling timer. msg.param is filled with the connId when the link
+   * opens and read back from pMsg->hdr.param on expiry -- the usual way to pass
+   * a parameter through a Cordio timer, with no separate copy of the
+   * connection id. */
+  tmpsRssiTimer.handlerId = handlerId;
+  tmpsRssiTimer.msg.event = TMPS_RSSI_TIMER_IND;
 }
 
 static void tmpsGapCfgInit(void)

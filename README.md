@@ -9,7 +9,7 @@ Watch on YouTube: [Apollo510B Smart Watch Demo](https://youtu.be/N_bFMPd-4I8) ·
 [Linux BLE Am62P connect to Apollo 510B](https://www.youtube.com/shorts/pJUpLRMOmOk) (Shorts).
 Both videos are hosted externally on YouTube and are not included in this source repository.
 
-A five-page FreeRTOS smartwatch UI on the apollo510b_evb, built on NemaGFX / NemaVG,
+A six-page FreeRTOS smartwatch UI on the apollo510b_evb, built on NemaGFX / NemaVG,
 with BLE (Cordio + EM9305), a TMP119 temperature sensor, a CHSC5816 touch panel,
 external PSRAM and an eMMC-backed asset store.
 
@@ -125,7 +125,7 @@ because the asset upload path shares them; see section 5.
 src/                     application source
   nemagfx_watchface.c    main(): clocks, display, eMMC, PSRAM, scheduler
   rtos.c                 task creation, priorities, idle hook, boot banner
-  render_task.c          all drawing: 5 pages, overlays, watch face selector,
+  render_task.c          all drawing: 6 pages, overlays, watch face selector,
                          page overview  (the largest file, heavily commented)
   display_task.c         DC/DSI wake, frame transfer, brightness apply
   touch.c / touch_task.c CHSC5816 driver wrapper + gesture classification
@@ -139,6 +139,8 @@ src/                     application source
   psram.c, backlight.c, led_task.c, tmp119.c, rtt_log.c
   generated/             the asset headers the build actually needs
   font/                  DejaVuSans vector font for NemaVG
+  Generate_3/            weather page sources: five sky PNGs, the overlay, the
+                         original composite it is cropped from (original/)
 
 gcc/                     Makefile, linker script, startup, J-Link scripts
 tools/                   host-side Python: asset conversion and upload
@@ -147,7 +149,8 @@ tools/                   host-side Python: asset conversion and upload
   asset_export.py        export the firmware's C arrays into .BIN
   face2/3/4_prep.py      per-watch-face asset preparation
   map_tile_gen.py        map PNGs -> RGB565 C arrays
-  assets_out/            ready-made .BIN files for all five pages
+  weather_prep.py        weather page: five backgrounds + the overlay -> WTHR*.BIN
+  assets_out/            ready-made .BIN files for all six pages
   nemagfx_ui_designer/   a PySide6 UI editor that emits NemaGFX/NemaVG C
 build_gui.py             build / flash / RTT GUI
 ```
@@ -177,28 +180,141 @@ so this costs BLE nothing. The reasoning is in the header of `touch_task.h`.
 `configTOTAL_HEAP_SIZE` is 48 KB and `configTIMER_QUEUE_LENGTH` is 16; both were
 raised from the SDK example's values for reasons recorded in `FreeRTOSConfig.h`.
 
-### 4.2 Memory
+### 4.2 Memory and where the graphics live
+
+Two rules decide where every image ends up:
+
+- **The GPU cannot sample MRAM**, let alone eMMC. A bitmap has to sit in SSRAM,
+  or in PSRAM through MSPI XIP, before it can be drawn. Binding a const array's
+  address straight to the GPU — which works on Apollo4P — produces a flickering
+  red screen here.
+- **Large bitmaps are files on eMMC, not part of the firmware.** They are read
+  at run time, so artwork can be replaced without reflashing (section 5).
+  Anything that can be described as geometry — gauges, curves, icons and all
+  text — is drawn by NemaVG at run time and needs no bitmap at all.
+
+#### Graphics by page
+
+| Page | Bitmaps (eMMC file → runtime copy) | Drawn at run time |
+|---|---|---|
+| HOME | `HOME.BIN` 454x454 RGB565 → SSRAM | the sweeping light (`nema_fill_rounded_rect`, additive blend) |
+| WATCH | dial and hands of all three faces → SSRAM | the face selector ring; its previews are the same textures, scaled |
+| TEMP | — | everything, with NemaVG: gauge arcs (`nema_vg_draw_ring`), ticks, the BLE and pairing icons (VG paths), the reading and the status text (DejaVuSans vector font) |
+| TREND | — | everything, with NemaVG: the 60-second curve, grid and rim (`nema_vg_draw_line`, `nema_vg_draw_ring`), clock and date text; the area under the curve is `nema_fill_quad_f` |
+| WEATHER | `WTHRBG0..4.BIN` 468x468 RGB565 (five skies) and `WTHRUI.BIN` 348x392 RGBA8888 (overlay) → PSRAM | the time and the Bluetooth symbol with a stroked halo (NemaVG); the slow pan and the cross-fade are GPU blits (`nema_blit_quad_fit`) |
+| MAP | `MAPTILE0..2.BIN` 468x468 RGB565 → PSRAM | the car and turn arrows (VG paths), the HUD panel and its text |
+| overlays | — | control centre, brightness panel and the temperature page's Bluetooth profile panel (rounded rects plus VG icons and text); the page overview scales the current framebuffer into a thumbnail |
+
+The vector font needs no copy either: NemaVG expands the glyphs into paths on
+the CPU, reading the font straight from MRAM. The bitmap font it replaced was a
+texture, and cost 358 KB of MRAM plus the same again in SSRAM.
+
+**The weather page and the old weather icon are different things.** The page is
+the bitmaps above, on eMMC. `src/generated/blowing.h`, `climate.h` and `day.h`
+are a small TSVG icon for the watch face, compiled into the firmware; it is
+switched off (`WATCHFACE_SHOW_WEATHER_ICON 0` in `render_task.c` — its position
+collides with the current dials), and `--gc-sections` then drops it, so it costs
+nothing in the current build.
+
+The one bitmap still built into the firmware is the UI Designer page's 178x191
+image (68 KB in MRAM, copied into SSRAM by `ui_designer_init()`). That page is
+currently out of the carousel (see `ui_page_e`), but the copy is still made at
+boot.
+
+#### eMMC contents
+
+FAT on the 8 GB eMMC, one file per asset, raw pixels with no header. The full
+set is `tools/assets_out/`: 27 files, 6,173,912 B.
+
+| Group | Files | Bytes | Where it goes |
+|---|---|---|---|
+| home image | `HOME.BIN` | 412,232 | SSRAM, at boot |
+| face "chrono" | `WATCHBG`, `HANDHR`, `HANDMIN`, `HANDSEC` | 435,940 | SSRAM, at boot |
+| face "ambiq" | `WF4BG`, `WF4HR`, `WF4MIN`, `WF4SEC`, `WF4CAP` | 468,528 | SSRAM, at boot |
+| face "numbers" | `WF3BG`, `WF3HR`, `WF3MIN`, `WF3SEC` | 460,908 | SSRAM, at boot |
+| face "aurora" | `WF2BG`, `WF2HR`, `WF2MIN`, `WF2SEC` | 346,256 | not loaded — its slot went to the ambiq face |
+| map tiles | `MAPTILE0` .. `MAPTILE2` | 1,314,144 | PSRAM, by MapTask (the start area is preloaded at boot) |
+| weather page | `WTHRBG0` .. `WTHRBG4`, `WTHRUI` | 2,735,904 | PSRAM, at boot (about 200 ms); a missing file is retried every 2 s while the page is shown |
+
+`WATCHFACE_ASSET_PROVISION=1` seeds only the home image, the chrono face and the
+map tiles (8 files, 2,162,316 B — the "+2.16 MB" in section 5). The ambiq and
+numbers faces always come from `asset_upload.py`.
+
+#### Memory map
+
+From `gcc/linker_script.ld` and the `.map` of the build described below.
+
+| Region | Base | Size | Used | Contents |
+|---|---|---|---|---|
+| MRAM | `0x00410000` | 4,128,768 B | 571,348 B (13.8%) | code, const data, initial values of `.data` |
+| ITCM | `0x00000000` | 32 KB | 28 B | `.itcm_text` |
+| DTCM | `0x20000000` | 512 KB | `.data` + `.bss` 116,720 B of 472 KB; main stack 11,008 B of 36 KB | FreeRTOS heap 48 KB (every task's stack and TCB), IOM / MSPI driver state, RTT buffers 2 x 4 KB, Cordio control blocks |
+| SSRAM | `0x20080000` | 3 MB | 2,757,472 B (87.7%) | the NemaGFX pool (2,752,512 B) plus 4,960 B of `AM_SHARED_RW` buffers (eMMC / FatFs / SDIO, touch DMA) |
+| PSRAM | `0x60000000` | 64 MB | 4,087,808 B (6%) | two 4 MB regions (see `psram.h`): the map tile cache at `0x60000000`, 3 slots x 442,368 B; the weather page at `0x60400000`, 5 x 442,368 B + 548,864 B (4 KB aligned) |
+| eMMC | SDIO0 | 8 GB | 3,438,008 B | the asset files above |
+
+About 379 KB of SSRAM is still outside the pool; raising `VMEM_SIZE` is the way
+to use it.
+
+#### The GPU pool
+
+`VMEM_SIZE = 0x2A0000` (2,752,512 B) in SSRAM. Every `NEMA_MEM_POOL_*` name
+allocates from this one array. In `RenderTask()` order:
+
+| Allocation | Bytes |
+|---|---|
+| command-list ring buffer (`nema_init`) | 9,664 |
+| NemaVG working buffers (`nema_vg_init(468, 468)`) and VG paths | not reported |
+| UI Designer image, copied from MRAM | 67,996 |
+| command list, sized to hold a whole TEMP frame | 32,768 |
+| framebuffer, 468x468 RGB565 | 438,048 |
+| page-overview thumbnail, 208x208 RGB565 | 86,528 |
+| 14 textures from eMMC (home image + three faces) | 1,777,608 |
+| **listed total** | **2,412,612** |
+
+The remaining 339,900 B covers NemaVG's buffers, allocation alignment and
+whatever is actually free; only the target knows the split. The boot log line
+`[render] textures: N loaded (X B), M failed` is the measured figure.
+
+The order is deliberate and was the root cause of two hardware failures: the
+framebuffer and the thumbnail are allocated **before** the eMMC textures, so a
+short pool costs a black watch face rather than a GPU bound to NULL and a dead
+board. The comment at that call site records both incidents.
+
+#### Build size
 
 ```
-MRAM     program and const data, flashed at 0x00410000
-TCM      FreeRTOS heap, task stacks
-SSRAM    VMEM_SIZE = 0x2A0000 (2.75 MB) NemaGFX pool:
-           NEMA_MEM_POOL_FB       framebuffer + page-overview thumbnail
-           NEMA_MEM_POOL_ASSETS   textures loaded from eMMC
-PSRAM    map tiles, XIP at 0x60000000, sampled directly by the GPU
-eMMC     FAT: every asset as one file
+nemagfx_watchface.axf  5,446,340 B  ELF with symbols and debug info, for the debugger only
+nemagfx_watchface.bin    571,348 B  the exact MRAM image J-Link writes at 0x00410000
+nemagfx_watchface.hex  1,607,113 B  the same 571,348 B as Intel HEX text
 ```
 
-The GPU on this platform **cannot sample MRAM**, so every texture is copied into
-SSRAM first (map tiles go to PSRAM, which the GPU *can* sample over MSPI XIP).
-Binding a const array's address straight to the GPU — which works on Apollo4P —
-produces a flickering red screen here.
+Only the `.bin` reaches the chip: `.text` 566,384 + `.ARM.exidx` 8 +
+`.itcm_text` 28 + `.data` initial values 4,928 = 571,348 B. `.bss` (111,792 B)
+and the GPU pool are `NOLOAD`, so they take RAM but no MRAM — which is also why
+a pool that is too small still links cleanly. The `.axf` size varies with the
+build directory, because the debug info records source paths.
 
-The allocation order in `RenderTask()` is deliberate and was the root cause of
-two hardware failures: the framebuffer and the thumbnail buffer are allocated
-**before** the optional assets, so a short pool costs a black watch face rather
-than a bound-to-NULL GPU and a dead board. The comment at that call site records
-both incidents.
+By component, from the `.map` (default build, `WATCHFACE_ASSET_PROVISION=0`):
+
+| Component | Bytes | Share |
+|---|---|---|
+| NemaGFX / NemaVG libraries | 101,253 | 17.7% |
+| Cordio BLE stack, WSF, uECC | 95,839 | 16.8% |
+| Ambiq HAL (`libam_hal.a`) | 88,408 | 15.5% |
+| UI Designer image (`ui_designer_assets.c`) | 68,136 | 11.9% |
+| DejaVuSans vector font | 65,613 | 11.5% |
+| other application sources | 37,260 | 6.5% |
+| `render_task.c` | 36,622 | 6.4% |
+| FatFs and the eMMC driver | 23,620 | 4.1% |
+| Ambiq device drivers and utils | 16,512 | 2.9% |
+| FreeRTOS | 15,767 | 2.8% |
+| NemaGFX platform port (`nema_hal.c` etc.) | 6,735 | 1.2% |
+| BSP and SEGGER RTT | 4,712 | 0.8% |
+| alignment and unattributed | 10,871 | 1.9% |
+
+With `WATCHFACE_ASSET_PROVISION=1` the seed images add 2,162,316 B, for an image
+of about 2.6 MB — still well inside MRAM.
 
 ### 4.3 Pages
 
@@ -206,13 +322,16 @@ both incidents.
 |---|---|
 | HOME | EdgePilot image with an additive sweeping light on the horizon |
 | WATCH | analogue face; swipe down for the face selector (3 faces) |
-| TEMP | TMP119 reading, circular gauge, BLE state (5 variants incl. LESC pairing) |
+| TEMP | TMP119 reading, circular gauge, BLE state (5 variants incl. LESC pairing); pull down from the top edge for the Bluetooth profile panel (device name, RSSI, service, security) |
 | TREND | clock, date, 60-second temperature curve with a shear projection |
-| MAP | Taipei 101 -> Taipei Main Station navigation over PSRAM tiles |
+| WEATHER | five cloud skies panning slowly and cross-fading every 24 s under a fixed overlay (date, temperature, forecast), with a live clock |
+| MAP | Taipei 101 -> Taipei Main Station navigation over PSRAM tiles; tap the top panel to pause / resume, swipe down from the centre to leave |
 
 Overlays: brightness panel (swipe up from the bottom edge, every page), control
 centre (swipe down from the top edge, home only), quick page menu (swipe right,
-home only), page overview (BTN0, every page).
+home only: trend, weather, navigation), Bluetooth profile panel (swipe down from
+the top edge, temperature page only), page overview (BTN0 or a double tap, every
+page).
 
 ---
 
@@ -241,7 +360,7 @@ python tools/asset_upload.py HOME.png            # converts, then sends
 python tools/asset_upload.py                     # GUI
 ```
 
-`tools/assets_out/` already contains a complete set for all five pages.
+`tools/assets_out/` already contains a complete set for all six pages.
 
 ### Flow control is the interesting part
 
@@ -271,6 +390,15 @@ documented in `src/asset_upload.h` and `tools/asset_upload.py`.
 
 These are the places where measured behaviour differed from the documentation or
 from a reasonable assumption. Each is commented in full at the call site.
+
+**A FreeRTOS mutex created before the scheduler starts leaves interrupts masked.**
+Creating it enters a critical section, and before the scheduler runs the port's
+nesting count is not 0, so leaving the section does not unmask interrupts again
+-- the eMMC provisioning and `psram_init()` that follow would run with interrupts
+off. The filesystem lock is therefore created by `AssetStoreLockInit()` in
+`setup_task()`. (It used to be declared and never created at all, so MapTask,
+RenderTask and the upload task could all be inside FatFs at once.)
+`src/asset_store.c`, `src/rtos.c`.
 
 **`am_util_stdio_snprintf()` writes no NUL terminator.** It copies characters and
 returns; it is not standard `snprintf`. Two failures came from this: a HUD
@@ -376,9 +504,10 @@ font. `README.md` and `CHANGELOG.md` in that directory have the details.
   selector). The comments cite them by path; the reasoning they contain has been
   summarized into the comments themselves.
 - The source PNGs for the map tiles and the watch faces. `tools/assets_out/`
-  holds the converted `.BIN` files for all five pages, which is what the board
+  holds the converted `.BIN` files for all six pages, which is what the board
   actually needs. `map_tile_gen.py` and `face*_prep.py` are included so the
-  conversion path is reviewable, but their inputs are not here.
+  conversion path is reviewable, but their inputs are not here. (The weather
+  page's sources are included: `src/Generate_3/`, used by `weather_prep.py`.)
 - Experimental asset variants under `src/generated/`. Only the headers the build
   actually `#include`s were copied.
 
@@ -396,3 +525,6 @@ font. `README.md` and `CHANGELOG.md` in that directory have the details.
   but both fail indication subscription and the reason is not yet established.
 - `MAP_CACHE_SLOTS` resolves to 3 for 3 tiles, so everything is resident and the
   LRU eviction never runs. It is kept for the day the map grows.
+- The weather page shows sample data: the date, place, temperature and forecast
+  are baked into `WTHRUI.BIN` by `weather_prep.py`, and only the clock is live.
+  There is no weather source on the board yet.

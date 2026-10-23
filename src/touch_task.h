@@ -376,6 +376,25 @@ typedef struct
     uint16_t       ui16MaxY;
 
     //
+    // When this press happened and how many fingers it used, for double-tap
+    // detection (see dtap_tap() in render_task.c).
+    //
+    // The times are recorded here rather than by RenderTask looking at the clock
+    // when it receives the gesture: RenderTask takes one gesture from the queue
+    // per frame, by which point the real release is one to several frames old
+    // (18-35 ms per frame, longer when busy) -- far too coarse for measuring a
+    // gap of about 300 ms. Here the error is a single report period (17 ms).
+    //
+    // ui8MaxFingers is the most fingers held at once over the whole press. When a
+    // pinch ends and the two fingers lift one after the other, the last one can
+    // start and end close together and be classified as a tap; this field is what
+    // identifies it as the tail of a two-finger gesture rather than a tap.
+    //
+    uint32_t       ui32DownTick;    // tick of the first sample with the finger down
+    uint32_t       ui32UpTick;      // tick of the first sample with the finger up
+    uint8_t        ui8MaxFingers;
+
+    //
     // Below is the "live state of this frame", as opposed to the fields above, which only mean something at release.
     //
     // The brightness slider needs it: gestures are classified when the finger lifts

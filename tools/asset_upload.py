@@ -36,6 +36,7 @@ The name sent up has to be one the firmware knows (see src/asset_store.h):
 
     HOME.BIN  WATCHBG.BIN  HANDHR.BIN  HANDMIN.BIN  HANDSEC.BIN
     MAPTILE0.BIN  MAPTILE1.BIN  MAPTILE2.BIN
+    WTHRBG0.BIN .. WTHRBG4.BIN  WTHRUI.BIN  (the weather page, made by tools/weather_prep.py)
 
 The size must match too; a mismatch is accepted by the firmware but leaves the image
 missing on screen (it prints short read at boot).
@@ -171,6 +172,15 @@ EXPECTED = {
     "WF4MIN.BIN": 30 * 193 * 4,
     "WF4SEC.BIN": 18 * 126 * 4,
     "WF4CAP.BIN": 46 * 46 * 4,
+    # The weather page: five plain-sky backgrounds and one overlay (the output of
+    # tools/weather_prep.py). The early WEATHER0..4.BIN (composites) are no longer
+    # used; the listing marks them "(not an asset)" and --delete removes them.
+    "WTHRBG0.BIN": 468 * 468 * 2,
+    "WTHRBG1.BIN": 468 * 468 * 2,
+    "WTHRBG2.BIN": 468 * 468 * 2,
+    "WTHRBG3.BIN": 468 * 468 * 2,
+    "WTHRBG4.BIN": 468 * 468 * 2,
+    "WTHRUI.BIN": 348 * 392 * 4,
 }
 
 #

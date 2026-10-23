@@ -362,7 +362,8 @@ extern void MapTaskSetActive(bool bActive);
 //
 //! @brief Stop or resume the navigation.
 //!
-//! @details A tap anywhere on the map page toggles this. While stopped the
+//! @details A tap on the map page's top panel toggles this (see
+//! map_input_update() in render_task.c). While stopped the
 //! vehicle stays put and the map can still be dragged around -- stopping is
 //! usually exactly for getting a clear look at the road ahead.
 //!

@@ -9,7 +9,7 @@
 [Linux BLE Am62P connect to Apollo 510B](https://www.youtube.com/shorts/pJUpLRMOmOk)（Shorts）。
 兩支影片都放在 YouTube 上，不包含在這個原始碼 repo 裡。
 
-這是一套在 apollo510b_evb 上執行的五頁式 FreeRTOS 智慧手錶使用者介面，以 NemaGFX / NemaVG
+這是一套在 apollo510b_evb 上執行的六頁式 FreeRTOS 智慧手錶使用者介面，以 NemaGFX / NemaVG
 為基礎，整合 BLE（Cordio + EM9305）、TMP119 溫度感測器、CHSC5816 觸控面板、
 外部 PSRAM，以及以 eMMC 儲存的素材庫。
 
@@ -120,7 +120,7 @@ python build_gui.py      # 或按兩下 launch_build_gui.bat
 src/                     應用程式原始碼
   nemagfx_watchface.c    main()：時脈、顯示器、eMMC、PSRAM、排程器
   rtos.c                 建立任務、優先權、idle hook、開機資訊
-  render_task.c          所有繪圖：5 個頁面、覆蓋面板、錶面選擇器、
+  render_task.c          所有繪圖：6 個頁面、覆蓋面板、錶面選擇器、
                          頁面總覽（最大的檔案，含大量註解）
   display_task.c         DC/DSI 喚醒、畫面傳輸、套用亮度
   touch.c / touch_task.c CHSC5816 驅動程式封裝與手勢分類
@@ -134,6 +134,8 @@ src/                     應用程式原始碼
   psram.c, backlight.c, led_task.c, tmp119.c, rtt_log.c
   generated/             建置實際需要的素材標頭檔
   font/                  供 NemaVG 使用的 DejaVuSans 向量字型
+  Generate_3/            天氣頁的來源：五張天空 PNG、介面層，以及裁切預報卡用的
+                         原始合成圖（original/）
 
 gcc/                     Makefile、連結器腳本、啟動程式、J-Link 腳本
 tools/                   主機端 Python 工具：素材轉換與上傳
@@ -142,7 +144,8 @@ tools/                   主機端 Python 工具：素材轉換與上傳
   asset_export.py        將韌體的 C 陣列匯出為 .BIN
   face2/3/4_prep.py      各款錶面的素材前處理
   map_tile_gen.py        地圖 PNG -> RGB565 C 陣列
-  assets_out/            五個頁面所需的現成 .BIN 檔案
+  weather_prep.py        天氣頁：五張底圖 + 介面層 -> WTHR*.BIN
+  assets_out/            六個頁面所需的現成 .BIN 檔案
   nemagfx_ui_designer/   可輸出 NemaGFX/NemaVG C 程式碼的 PySide6 UI 編輯器
 build_gui.py             建置／燒錄／RTT 圖形介面
 ```
@@ -171,26 +174,132 @@ TouchTask 刻意設為與 RadioTask 相同的優先權，因為它必須能搶�
 `configTOTAL_HEAP_SIZE` 為 48 KB，`configTIMER_QUEUE_LENGTH` 為 16；兩者都比 SDK
 範例的設定值大，調整原因記錄於 `FreeRTOSConfig.h`。
 
-### 4.2 記憶體
+### 4.2 記憶體與圖像的存放位置
+
+每張圖放在哪裡，由兩條規則決定：
+
+- **GPU 無法對 MRAM 取樣**，更不可能直接讀 eMMC。點陣圖必須先放進 SSRAM，
+  或放進可透過 MSPI XIP 存取的 PSRAM，才能被繪製。直接把 const 陣列位址綁定給
+  GPU，在 Apollo4P 上可以運作，但在這裡會產生閃爍的紅色畫面。
+- **大型點陣圖是 eMMC 上的檔案，不屬於韌體。** 執行時才讀取，所以換圖不必重新
+  燒錄（見第 5 節）。凡是能用幾何描述的內容——儀表、曲線、圖示與所有文字——都由
+  NemaVG 即時繪製，完全不需要點陣圖。
+
+#### 各頁面的圖像來源
+
+| 頁面 | 點陣圖（eMMC 檔案 → 執行時的副本） | 即時繪製的內容 |
+|---|---|---|
+| HOME | `HOME.BIN` 454x454 RGB565 → SSRAM | 掃光效果（`nema_fill_rounded_rect`，加法混色） |
+| WATCH | 三款錶面的錶盤與指針 → SSRAM | 錶面選擇器的圓環；選擇器裡的預覽是同一批紋理縮小繪製 |
+| TEMP | — | 全部以 NemaVG 繪製：儀表圓弧（`nema_vg_draw_ring`）、刻度、BLE 與配對圖示（VG 路徑）、溫度讀值與狀態文字（DejaVuSans 向量字型） |
+| TREND | — | 全部以 NemaVG 繪製：60 秒溫度曲線、格線與外框（`nema_vg_draw_line`、`nema_vg_draw_ring`）、時間與日期文字；曲線下方的填色是 `nema_fill_quad_f` |
+| WEATHER | `WTHRBG0..4.BIN` 468x468 RGB565（五張天空）與 `WTHRUI.BIN` 348x392 RGBA8888（介面層）→ PSRAM | 時間與藍牙符號，外加描邊光暈（NemaVG）；緩慢平移與交叉淡入是 GPU 貼圖（`nema_blit_quad_fit`） |
+| MAP | `MAPTILE0..2.BIN` 468x468 RGB565 → PSRAM | 車輛與轉彎箭頭（VG 路徑）、HUD 面板與其文字 |
+| 覆蓋面板 | — | 控制中心、亮度面板與溫度頁的藍牙 profile 面板（圓角矩形加 VG 圖示與文字）；頁面總覽是把當前畫面緩衝區縮小成縮圖 |
+
+向量字型也不需要複製：NemaVG 在 CPU 端把字形展開成路徑，字型資料直接從 MRAM 讀取。
+被它取代的點陣字型是一張紋理，曾經占用 358 KB 的 MRAM，SSRAM 裡還要再占一份同樣大小。
+
+**天氣頁與舊的天氣圖示是兩回事。** 天氣頁是上表那些放在 eMMC 的點陣圖；
+`src/generated/blowing.h`、`climate.h`、`day.h` 則是錶面上的 TSVG 小圖示，編進韌體。
+它目前是關閉的（`render_task.c` 中的 `WATCHFACE_SHOW_WEATHER_ICON 0`——位置會和現在
+的錶盤重疊），而且 `--gc-sections` 會把它移除，所以在目前的建置中不占任何空間。
+
+唯一仍編進韌體的點陣圖，是 UI Designer 頁面的 178x191 圖片（在 MRAM 中占 68 KB，
+由 `ui_designer_init()` 複製進 SSRAM）。這個頁面目前不在頁面輪播中（見 `ui_page_e`），
+但開機時仍會做這次複製。
+
+#### eMMC 的內容
+
+8 GB eMMC 上的 FAT 檔案系統，每個素材一個檔案，內容是沒有檔頭的原始像素。完整的一組
+在 `tools/assets_out/`：27 個檔案，共 6,173,912 B。
+
+| 群組 | 檔案 | 位元組 | 去向 |
+|---|---|---|---|
+| 首頁圖 | `HOME.BIN` | 412,232 | 開機時載入 SSRAM |
+| 錶面「chrono」 | `WATCHBG`、`HANDHR`、`HANDMIN`、`HANDSEC` | 435,940 | 開機時載入 SSRAM |
+| 錶面「ambiq」 | `WF4BG`、`WF4HR`、`WF4MIN`、`WF4SEC`、`WF4CAP` | 468,528 | 開機時載入 SSRAM |
+| 錶面「numbers」 | `WF3BG`、`WF3HR`、`WF3MIN`、`WF3SEC` | 460,908 | 開機時載入 SSRAM |
+| 錶面「aurora」 | `WF2BG`、`WF2HR`、`WF2MIN`、`WF2SEC` | 346,256 | 不載入——它的位置讓給了 ambiq 錶面 |
+| 地圖圖磚 | `MAPTILE0` .. `MAPTILE2` | 1,314,144 | 由 MapTask 載入 PSRAM（開機時先預載起點附近） |
+| 天氣頁 | `WTHRBG0` .. `WTHRBG4`、`WTHRUI` | 2,735,904 | 開機時載入 PSRAM（約 200 ms）；缺檔時，停在天氣頁期間每 2 秒補讀一個 |
+
+`WATCHFACE_ASSET_PROVISION=1` 只會預載首頁圖、chrono 錶面與地圖圖磚（8 個檔案，
+2,162,316 B，也就是第 5 節所說的「+2.16 MB」）。ambiq 與 numbers 兩款錶面一律要用
+`asset_upload.py` 上傳。
+
+#### 記憶體配置
+
+依據 `gcc/linker_script.ld` 與下方所述建置的 `.map` 檔。
+
+| 區域 | 起始位址 | 容量 | 已使用 | 內容 |
+|---|---|---|---|---|
+| MRAM | `0x00410000` | 4,128,768 B | 571,348 B（13.8%） | 程式碼、const 資料、`.data` 的初始值 |
+| ITCM | `0x00000000` | 32 KB | 28 B | `.itcm_text` |
+| DTCM | `0x20000000` | 512 KB | `.data` + `.bss` 116,720 B（上限 472 KB）；主堆疊 11,008 B（上限 36 KB） | FreeRTOS heap 48 KB（所有任務的堆疊與 TCB）、IOM / MSPI 驅動狀態、RTT 緩衝區 2 x 4 KB、Cordio 控制區塊 |
+| SSRAM | `0x20080000` | 3 MB | 2,757,472 B（87.7%） | NemaGFX 記憶體池（2,752,512 B），另有 4,960 B 的 `AM_SHARED_RW` 緩衝區（eMMC / FatFs / SDIO、觸控 DMA） |
+| PSRAM | `0x60000000` | 64 MB | 4,087,808 B（6%） | 兩段各 4 MB（見 `psram.h`）：`0x60000000` 是地圖圖磚快取，3 個 slot x 442,368 B；`0x60400000` 是天氣頁，5 x 442,368 B + 548,864 B（4 KB 對齊） |
+| eMMC | SDIO0 | 8 GB | 3,438,008 B | 上表的素材檔案 |
+
+SSRAM 在記憶體池之外還有約 379 KB 未使用；要用到這部分，就調大 `VMEM_SIZE`。
+
+#### GPU 記憶體池
+
+SSRAM 中的 `VMEM_SIZE = 0x2A0000`（2,752,512 B）。所有 `NEMA_MEM_POOL_*` 名稱都從
+這同一個陣列配置。依 `RenderTask()` 中的順序：
+
+| 配置項目 | 位元組 |
+|---|---|
+| command list 環狀緩衝區（`nema_init`） | 9,664 |
+| NemaVG 工作緩衝區（`nema_vg_init(468, 468)`）與 VG 路徑 | 未回報 |
+| UI Designer 圖片，從 MRAM 複製 | 67,996 |
+| command list，大小足以容納一整個 TEMP 畫面 | 32,768 |
+| 畫面緩衝區，468x468 RGB565 | 438,048 |
+| 頁面總覽縮圖，208x208 RGB565 | 86,528 |
+| 從 eMMC 載入的 14 個紋理（首頁圖 + 三款錶面） | 1,777,608 |
+| **以上合計** | **2,412,612** |
+
+剩下的 339,900 B 包含 NemaVG 的緩衝區、配置時的對齊，以及真正空著的部分；三者各占
+多少只有在板子上才知道。開機日誌中的 `[render] textures: N loaded (X B), M failed`
+是實測數字。
+
+配置順序是刻意安排的，先前曾因順序問題造成兩次硬體執行故障：畫面緩衝區與縮圖都在
+eMMC 紋理**之前**配置，如此一來，記憶體池不足時最多只會讓錶面變黑，而不會讓 GPU
+綁定至 NULL 並造成開發板停止回應。該呼叫位置的註解記錄了這兩次事件。
+
+#### 編譯大小
 
 ```
-MRAM     程式與 const 資料，燒錄位址為 0x00410000
-TCM      FreeRTOS heap、任務堆疊
-SSRAM    VMEM_SIZE = 0x2A0000（2.75 MB）的 NemaGFX 記憶體池：
-           NEMA_MEM_POOL_FB       畫面緩衝區與頁面總覽縮圖
-           NEMA_MEM_POOL_ASSETS   從 eMMC 載入的紋理
-PSRAM    地圖圖磚，XIP 位址為 0x60000000，供 GPU 直接取樣
-eMMC     FAT：每個素材各存成一個檔案
+nemagfx_watchface.axf  5,446,340 B  含符號與除錯資訊的 ELF，只供除錯器使用
+nemagfx_watchface.bin    571,348 B  J-Link 寫入 0x00410000 的 MRAM 映像本體
+nemagfx_watchface.hex  1,607,113 B  同樣的 571,348 B，以 Intel HEX 文字格式表示
 ```
 
-此平台的 GPU **無法對 MRAM 進行取樣**，因此每個紋理都必須先複製到 SSRAM
-（地圖圖磚則存入 PSRAM，GPU *可以*透過 MSPI XIP 對它取樣）。
-直接將 const 陣列位址綁定給 GPU，在 Apollo4P 上可以運作，但在這裡會產生閃爍的紅色畫面。
+只有 `.bin` 會寫進晶片：`.text` 566,384 + `.ARM.exidx` 8 + `.itcm_text` 28 +
+`.data` 初始值 4,928 = 571,348 B。`.bss`（111,792 B）與 GPU 記憶體池都是 `NOLOAD`，
+只占 RAM、不占 MRAM——這也是記憶體池設得太小時連結仍會成功的原因。`.axf` 的大小會隨
+建置目錄改變，因為除錯資訊裡記錄了原始檔路徑。
 
-`RenderTask()` 中的記憶體配置順序是刻意安排的，先前曾因順序問題造成兩次硬體執行故障：
-畫面緩衝區與縮圖緩衝區都必須**先於**非必要素材完成配置，如此一來，記憶體池不足時，
-最多只會讓錶面變黑，而不會讓 GPU 綁定至 NULL 並造成開發板停止回應。
-該呼叫位置的註解記錄了這兩次事件。
+依元件拆分，資料來自 `.map` 檔（預設建置，`WATCHFACE_ASSET_PROVISION=0`）：
+
+| 元件 | 位元組 | 占比 |
+|---|---|---|
+| NemaGFX / NemaVG 函式庫 | 101,253 | 17.7% |
+| Cordio BLE 協定堆疊、WSF、uECC | 95,839 | 16.8% |
+| Ambiq HAL（`libam_hal.a`） | 88,408 | 15.5% |
+| UI Designer 圖片（`ui_designer_assets.c`） | 68,136 | 11.9% |
+| DejaVuSans 向量字型 | 65,613 | 11.5% |
+| 其他應用程式原始碼 | 37,260 | 6.5% |
+| `render_task.c` | 36,622 | 6.4% |
+| FatFs 與 eMMC 驅動 | 23,620 | 4.1% |
+| Ambiq 裝置驅動與工具函式 | 16,512 | 2.9% |
+| FreeRTOS | 15,767 | 2.8% |
+| NemaGFX 平台移植層（`nema_hal.c` 等） | 6,735 | 1.2% |
+| BSP 與 SEGGER RTT | 4,712 | 0.8% |
+| 對齊與未歸類 | 10,871 | 1.9% |
+
+若設定 `WATCHFACE_ASSET_PROVISION=1`，預載用的圖片會再增加 2,162,316 B，映像約
+2.6 MB，仍遠在 MRAM 容量之內。
 
 ### 4.3 頁面
 
@@ -198,13 +307,15 @@ eMMC     FAT：每個素材各存成一個檔案
 |---|---|
 | HOME | EdgePilot 圖像，搭配地平線上的加法混色掃光效果 |
 | WATCH | 指針式錶面；向下滑動可開啟錶面選擇器（3 款錶面） |
-| TEMP | TMP119 讀值、環形儀表、BLE 狀態（5 種顯示狀態，包含 LESC 配對） |
+| TEMP | TMP119 讀值、環形儀表、BLE 狀態（5 種顯示狀態，包含 LESC 配對）；從頂部邊緣往下拉可開啟藍牙 profile 面板（裝置名稱、RSSI、服務、安全性） |
 | TREND | 時鐘、日期，以及帶有剪切投影效果的 60 秒溫度曲線 |
-| MAP | 使用 PSRAM 圖磚顯示台北 101 -> 台北車站導航 |
+| WEATHER | 五張雲層天空緩慢平移、每 24 秒交叉淡入換一張，上面疊固定的介面層（日期、溫度、預報），時間即時繪製 |
+| MAP | 使用 PSRAM 圖磚顯示台北 101 -> 台北車站導航；點上方面板暫停／繼續，從畫面中央往下滑離開 |
 
 覆蓋面板包含：亮度面板（所有頁面皆可從底部邊緣向上滑動開啟）、控制中心
-（僅首頁可從頂部邊緣向下滑動開啟）、快速頁面選單（僅首頁可向右滑動開啟），
-以及頁面總覽（所有頁面皆可按 BTN0 開啟）。
+（僅首頁可從頂部邊緣向下滑動開啟）、快速頁面選單（僅首頁可向右滑動開啟：趨勢、
+天氣、導航）、藍牙 profile 面板（僅溫度頁可從頂部邊緣向下滑動開啟），以及頁面總覽
+（所有頁面皆可按 BTN0 或點兩下開啟）。
 
 ---
 
@@ -233,7 +344,7 @@ python tools/asset_upload.py HOME.png            # 先轉換，再傳送
 python tools/asset_upload.py                     # 圖形介面
 ```
 
-`tools/assets_out/` 已包含五個頁面所需的完整素材。
+`tools/assets_out/` 已包含六個頁面所需的完整素材。
 
 ### 流量控制是其中的關鍵
 
@@ -261,6 +372,12 @@ RTT 下行緩衝區大小為 4 KB，**填滿時 J-Link 會丟棄多出的資料�
 ## 6. 值得留意的實測發現
 
 以下列出實測行為與文件描述或合理預期不同的地方，每一項都已在相關呼叫位置留下完整註解。
+
+**在 scheduler 啟動前建立 FreeRTOS mutex，會讓中斷一直被遮住。** 建立時會進入一次
+critical section，而 scheduler 啟動前 port 的 nesting 計數不是 0，離開時不會把中斷放回
+來——緊接在後的 eMMC 預載與 `psram_init()` 都會在中斷關閉的狀態下執行。因此檔案系統的
+鎖改由 `setup_task()` 裡的 `AssetStoreLockInit()` 建立。（這把鎖原本只有宣告、從未建立，
+MapTask、RenderTask 與上傳任務可能同時進入 FatFs。）`src/asset_store.c`、`src/rtos.c`。
 
 **`am_util_stdio_snprintf()` 不會寫入 NUL 結尾字元。** 它複製字元後就返回，並非標準的
 `snprintf`。這曾造成兩個問題：HUD 距離顯示成 `4.9 kmC -`，以及地圖圖磚檔名變成
@@ -359,9 +476,10 @@ python -m unittest discover -s tools/nemagfx_ui_designer/tests
 - `docs/`：程式碼所引用的開發筆記，包含 BLE 啟動調查、eMMC 素材庫、記憶體架構、
   地圖導航頁面與錶面選擇器。註解會以路徑引用這些文件，其中的設計理由已摘要整理至
   程式碼註解中。
-- 地圖圖磚與錶面的原始 PNG。`tools/assets_out/` 已提供五個頁面轉換完成的 `.BIN`
+- 地圖圖磚與錶面的原始 PNG。`tools/assets_out/` 已提供六個頁面轉換完成的 `.BIN`
   檔案，這些才是開發板實際需要的資料。專案保留 `map_tile_gen.py` 與 `face*_prep.py`，
-  以便檢視轉換流程，但未附上它們使用的輸入檔案。
+  以便檢視轉換流程，但未附上它們使用的輸入檔案。（天氣頁的來源有附上：
+  `src/Generate_3/`，由 `weather_prep.py` 使用。）
 - `src/generated/` 下的實驗性素材版本。僅複製了建置過程實際透過 `#include` 引用的標頭檔。
 
 ---
@@ -376,3 +494,5 @@ python -m unittest discover -s tools/nemagfx_ui_designer/tests
   原因尚未釐清。
 - 目前共有 3 個圖磚，`MAP_CACHE_SLOTS` 的計算結果也為 3，因此所有圖磚都會常駐，
   LRU 淘汰機制不會執行。這個機制仍保留，以供日後擴充地圖使用。
+- 天氣頁顯示的是範例資料：日期、地點、溫度與預報都由 `weather_prep.py` 畫進
+  `WTHRUI.BIN`，只有時間是即時的。板子上目前沒有天氣資料來源。
