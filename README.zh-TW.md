@@ -1,9 +1,13 @@
 # nemagfx_watchface — Apollo510B EVB
 
-[![在 YouTube 觀看 Apollo510B Smart Watch Demo](https://i.ytimg.com/vi/N_bFMPd-4I8/maxresdefault.jpg)](https://youtu.be/N_bFMPd-4I8)
+<p align="center">
+  <a href="https://youtu.be/N_bFMPd-4I8"><img src="https://i.ytimg.com/vi/N_bFMPd-4I8/maxresdefault.jpg" alt="在 YouTube 觀看 Apollo510B Smart Watch Demo" width="73%"></a>
+  <a href="https://www.youtube.com/shorts/pJUpLRMOmOk"><img src="https://i.ytimg.com/vi/pJUpLRMOmOk/oardefault.jpg" alt="在 YouTube Shorts 觀看 Linux BLE Am62P connect to Apollo 510B" width="23%"></a>
+</p>
 
-[在 YouTube 觀看 Apollo510B Smart Watch Demo 示範影片](https://youtu.be/N_bFMPd-4I8)。
-影片放在 YouTube 上，不包含在這個原始碼 repo 裡。
+在 YouTube 觀看：[Apollo510B Smart Watch Demo](https://youtu.be/N_bFMPd-4I8) ·
+[Linux BLE Am62P connect to Apollo 510B](https://www.youtube.com/shorts/pJUpLRMOmOk)（Shorts）。
+兩支影片都放在 YouTube 上，不包含在這個原始碼 repo 裡。
 
 這是一套在 apollo510b_evb 上執行的五頁式 FreeRTOS 智慧手錶使用者介面，以 NemaGFX / NemaVG
 為基礎，整合 BLE（Cordio + EM9305）、TMP119 溫度感測器、CHSC5816 觸控面板、

@@ -1,9 +1,13 @@
 # nemagfx_watchface — Apollo510B EVB
 
-[![Watch the Apollo510B Smart Watch Demo on YouTube](https://i.ytimg.com/vi/N_bFMPd-4I8/maxresdefault.jpg)](https://youtu.be/N_bFMPd-4I8)
+<p align="center">
+  <a href="https://youtu.be/N_bFMPd-4I8"><img src="https://i.ytimg.com/vi/N_bFMPd-4I8/maxresdefault.jpg" alt="Watch the Apollo510B Smart Watch Demo on YouTube" width="73%"></a>
+  <a href="https://www.youtube.com/shorts/pJUpLRMOmOk"><img src="https://i.ytimg.com/vi/pJUpLRMOmOk/oardefault.jpg" alt="Watch Linux BLE Am62P connect to Apollo 510B on YouTube Shorts" width="23%"></a>
+</p>
 
-[Watch the Apollo510B Smart Watch Demo on YouTube](https://youtu.be/N_bFMPd-4I8).
-The video is hosted externally on YouTube and is not included in this source repository.
+Watch on YouTube: [Apollo510B Smart Watch Demo](https://youtu.be/N_bFMPd-4I8) ·
+[Linux BLE Am62P connect to Apollo 510B](https://www.youtube.com/shorts/pJUpLRMOmOk) (Shorts).
+Both videos are hosted externally on YouTube and are not included in this source repository.
 
 A five-page FreeRTOS smartwatch UI on the apollo510b_evb, built on NemaGFX / NemaVG,
 with BLE (Cordio + EM9305), a TMP119 temperature sensor, a CHSC5816 touch panel,
